@@ -106,12 +106,19 @@ static void ntp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
   // Check the result
   if (ip_addr_cmp(addr, &state->ntp_server_address) && port == NTP_PORT && p->tot_len == NTP_MSG_LEN &&
       mode == 0x4 && stratum != 0) {
-    printf("NTP SUCCESS!!!\n");
+    printf("ntp_recv:  NTP SUCCESS!!!\n");
     uint8_t seconds_buf[4] = {0};
     pbuf_copy_partial(p, seconds_buf, sizeof(seconds_buf), 40);
     uint32_t seconds_since_1900 = seconds_buf[0] << 24 | seconds_buf[1] << 16 | seconds_buf[2] << 8 | seconds_buf[3];
+    printf("ntp_recv:  seconds since 1900 = %u\n", seconds_since_1900);
     uint32_t seconds_since_1970 = seconds_since_1900 - NTP_DELTA;
-    time_t epoch = seconds_since_1970 - EST_DELTA;
+    printf("ntp_recv:  seconds since 1970 = %u\n", seconds_since_1970);
+    printf("ntp_recv:  EST seconds since 1970 = %u\n", seconds_since_1970 - EST_DELTA);
+    time_t epoch = static_cast<time_t>(seconds_since_1970 - EST_DELTA);
+    printf("ntp_recv:  size of time_t = %u,  epoch seconds = %ld\n", sizeof(epoch), epoch);
+    tm* ptm = gmtime(&epoch);
+    printf("ntp_recv:  tm.year = *d, tm.yday = %d\n", ptm->tm_year, ptm->tm_yday);
+   
     state->result = {epoch, *gmtime(&epoch)};
     state->err = NTP_ERR_CODE::NTP_ERR_OK;
   } else {
@@ -125,6 +132,7 @@ static void ntp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
 
 NTP_ERR_CODE getNtpTime(TimeResult &result) {
   sleep_ms(5000);
+  printf("getNtpTime...\n");
   if (cyw43_arch_init()) {
     printf("failed to initialise\n");
     return NTP_ERR_CODE::NTP_ERR_WIFI_INIT_FAILURE;

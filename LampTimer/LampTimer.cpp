@@ -53,16 +53,18 @@ constexpr int DAYS_IN_MONTHS[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 3
 float radToDeg(float radians) { return radians * 360.0f / PI / 2.0f;  }
 // Leap years are evenly div by 4, but not evenly div by 100, unless evenly div by 400
 bool isLeapYear(int year) { return ((year % 4) || (!(year % 100) && (year % 400))); }
-int daysInYear(int year) { return isLeapYear(year) ? 365 : 366; }
+int daysInYear(int year) { return isLeapYear(year) ? 366 : 365; }
 int getYearDay(datetime_t& t) {
   int year_day = static_cast<int>(t.day);
-  for (int i = 0; i < static_cast<int>(t.month - 1); ++i) year_day += DAYS_IN_MONTHS[i];
-  if (isLeapYear(t.year)) ++year_day;
+  for (int i = 0; i < static_cast<int>(t.month); ++i) year_day += DAYS_IN_MONTHS[i];
+  if (isLeapYear(t.year) && (t.month > 2)) ++year_day;
+  printf("getYearDay:  day = %d, month = %d, year day = %d", t.day, t.month, year_day);
   return year_day;
 }
 
 // In UTC minutes.  Could be >= 24 hrs.
 int computeSunset(int day_of_year, int year) {
+  printf("computeSunset:  day_of_year = %d, year = %d\n", day_of_year, year);
   // Fractional year in radians (not accounting for hours)
   float gamma = (2.0f * PI / static_cast<float>(daysInYear(year))) * (static_cast<float>(day_of_year) - 1.0f);
   // Equation of time (in minutes)
@@ -135,20 +137,23 @@ bool setTime(bool init) {
   } while ((init || --retries) && err != NTP_ERR_CODE::NTP_ERR_OK);
   if (err == NTP_ERR_CODE::NTP_ERR_OK) {
     gpio_put(RED_LED, false);
+    gpio_put(GREEN_LED, true);
+    printf("NTP time tm: year = %d, mon = %d, mday = %d, hour = %d, min = %d\n", result.time.tm_year, result.time.tm_mon, result.time.tm_mday, result.time.tm_hour, result.time.tm_min);
     datetime_t t = {
-        .year = static_cast<short>(result.time.tm_year),
-        .month = static_cast<char>(result.time.tm_mon),
-        .day = static_cast<char>(result.time.tm_mday),
-        .dotw = static_cast<char>(result.time.tm_wday),
-        .hour = static_cast<char>(result.time.tm_hour),
-        .min = static_cast<char>(result.time.tm_min),
-        .sec = static_cast<char>(result.time.tm_sec)
+        .year = static_cast<short>(result.time.tm_year + 1900),  // tm_year is years since 1900.
+        .month = static_cast<signed char>(result.time.tm_mon),
+        .day = static_cast<signed char>(result.time.tm_mday),
+        .dotw = static_cast<signed char>(result.time.tm_wday),
+        .hour = static_cast<signed char>(result.time.tm_hour),
+        .min = static_cast<signed char>(result.time.tm_min),
+        .sec = static_cast<signed char>(result.time.tm_sec)
     };
+    printf("NTP time datetime_t: year = %d, mon = %d, mday = %d, hour = %d, min = %d\n", static_cast<int>(t.year), static_cast<int>(t.month), static_cast<int>(t.day), static_cast<int>(t.hour), static_cast<int>(t.min));
     if (init) rtc_init();
     rtc_set_datetime(&t);
     // clk_sys is >2000x faster than clk_rtc, so datetime is not updated immediately when rtc_get_datetime() is called.
     // The delay is up to 3 RTC clock cycles (which is 64us with the default clock settings)
-    sleep_us(64);
+    sleep_ms(1);
     return true;
   }
   return false;
@@ -163,15 +168,6 @@ int main()
   stdio_init_all();
   initPins();
   sleep_ms(5000);
-  /**************** TEST CODE  >>> */
-  printf("TEST CODE:  SETTING PINS\n");
-  gpio_put(RED_LED, true);
-  gpio_put(GREEN_LED, true);
-  gpio_put(BLUE_LED, true);
-  gpio_put(RELAY, true);
-  sleep_ms(5000);
-  gpio_put(RELAY, false);
-  /**************** <<< TEST CODE  */
 
   // Initialization.  At startup we:
   //  - Set the current time (with respect to NTP server).
@@ -204,8 +200,8 @@ int main()
     }
     // If the lamp is currently on then we need to turn it off and sleep until it is time to turn it off
     unsigned int sleep_time;
-    sunset = computeSunset(getYearDay(t), t.year);
     rtc_get_datetime(&t);
+    sunset = computeSunset(getYearDay(t), t.year);
     if (lamp_on) {
       printf("main:  Lamp was ON.  Toggling OFF.");
       gpio_put(RELAY, false);
