@@ -55,24 +55,23 @@ target_link_libraries(web_cam
 # Add the standard include files to the build
 target_include_directories(web_cam PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
-    C:/Users/kier/source/pico/lib/pico_hm01b0/include
-    C:/Users/kier/source/pico/lib/tcp_client/include
-    C:/Users/kier/source/pico/lib/too_jpeg/include
+    $ENV{PICO_LIB_PATH}/pico_hm01b0/include
+    $ENV{PICO_LIB_PATH}/tcp_client/include
+    $ENV{PICO_LIB_PATH}/too_jpeg/include
 )
-
 #Add any user requested libraries
 target_link_libraries(web_cam
   #pico_cyw43_arch_lwip_threadsafe_background
 
-  C:/Users/kier/source/pico/lib/pico_hm01b0/build/libade_pico_hm01b0.a
+  $ENV{PICO_LIB_PATH}/pico_hm01b0/build/libade_pico_hm01b0.a
   #C:/Users/kier/source/pico/lib/pico_hm01b0/build/libmock_pico_hm01b0.a
   #C:/Users/kier/source/pico/lib/pico_hm01b0/build/libbit_bang_pico_hm01b0.a
   #C:/Users/kier/source/pico/lib/pico_hm01b0/build/libmarques_pico_hm01b0.a
 
-  C:/Users/kier/source/pico/lib/tcp_client/build/liblwip_tcp_client.a
+  $ENV{PICO_LIB_PATH}/tcp_client/build/liblwip_tcp_client.a
   #C:/Users/kier/source/pico/lib/tcp_client/build/libmock_tcp_client.a
 
-  C:/Users/kier/source/pico/lib/too_jpeg/build/libtoo_jpeg.a
+  $ENV{PICO_LIB_PATH}/too_jpeg/build/libtoo_jpeg.a
   #C:/Users/kier/source/pico/lib/too_jpeg/build/libstb_too_jpeg.a
   #C:/Users/kier/source/pico/lib/too_jpeg/build/libmock_too_jpeg.a
 )
