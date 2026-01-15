@@ -56,9 +56,9 @@ bool isLeapYear(int year) { return ((year % 4) || (!(year % 100) && (year % 400)
 int daysInYear(int year) { return isLeapYear(year) ? 366 : 365; }
 int getYearDay(datetime_t& t) {
   int year_day = static_cast<int>(t.day);
-  for (int i = 0; i < static_cast<int>(t.month); ++i) year_day += DAYS_IN_MONTHS[i];
+  for (int i = 1; i < static_cast<int>(t.month); ++i) year_day += DAYS_IN_MONTHS[i-1];
   if (isLeapYear(t.year) && (t.month > 2)) ++year_day;
-  printf("getYearDay:  day = %d, month = %d, year day = %d", t.day, t.month, year_day);
+  printf("getYearDay:  day = %d, month = %d, year day = %d\n", t.day, t.month, year_day);
   return year_day;
 }
 
@@ -82,13 +82,13 @@ int computeSunset(int day_of_year, int year) {
   return static_cast<int>(720.0f - 4.0f * radToDeg(LONGITUDE - ha) - eqtime) - 300;
 }
 
-constexpr int RED_LED = 14;
-constexpr int GREEN_LED = 15;
-constexpr int BLUE_LED = 16;
-constexpr int RELAY = 17;
+constexpr int RED_LED = 11;
+constexpr int GREEN_LED = 7;
+constexpr int WHITE_LED = 3;
+constexpr int RELAY = 26;
 
 void initGpio() {
-  for (auto& pin : { RED_LED, GREEN_LED, BLUE_LED, RELAY }) {
+  for (auto& pin : { RED_LED, GREEN_LED, WHITE_LED, RELAY }) {
     printf("initGpio:  Initing Pin %d\n", pin);
     gpio_init(pin);
     // Set the pin's direction to output
@@ -100,11 +100,11 @@ void initPins() {
   initGpio();
   gpio_put(RED_LED, true);
   gpio_put(GREEN_LED, true);
-  gpio_put(BLUE_LED, true);
-  gpio_put(RELAY, false);
+  gpio_put(WHITE_LED, true);
+  gpio_put(RELAY, true);  // Relay off at init (active low)
 }
 
-constexpr int TWO_OCLOCK_MINUTES = 120;  // Since we are doing everything in UTC this is what 2:00EST is in UTC
+constexpr int TWO_OCLOCK_MINUTES = 120;
 
 unsigned int minuteOfDay(datetime_t& t) {
   return static_cast<unsigned int>(t.hour) * 60 + static_cast<unsigned int>(t.min);
@@ -129,7 +129,7 @@ bool setTime(bool init) {
         gpio_put(RED_LED, true);
         if (init) {
           gpio_put(GREEN_LED, false);
-          gpio_put(BLUE_LED, false);
+          gpio_put(WHITE_LED, false);
         }
         pins_set = true;
       }
@@ -140,8 +140,8 @@ bool setTime(bool init) {
     gpio_put(GREEN_LED, true);
     printf("NTP time tm: year = %d, mon = %d, mday = %d, hour = %d, min = %d\n", result.time.tm_year, result.time.tm_mon, result.time.tm_mday, result.time.tm_hour, result.time.tm_min);
     datetime_t t = {
-        .year = static_cast<short>(result.time.tm_year + 1900),  // tm_year is years since 1900.
-        .month = static_cast<signed char>(result.time.tm_mon),
+        .year = static_cast<short>(result.time.tm_year + ((result.time.tm_year < 126) ? 2036 : 1900)),  // tm_year is years since 1900.
+        .month = static_cast<signed char>(result.time.tm_mon + 1),  // tm_mon is 0-based, datetime_t is 1-based.
         .day = static_cast<signed char>(result.time.tm_mday),
         .dotw = static_cast<signed char>(result.time.tm_wday),
         .hour = static_cast<signed char>(result.time.tm_hour),
@@ -176,7 +176,7 @@ int main()
   //      This enables the main loop to toggle LEDs to the current desired state
   //      and set the sleep timer to the next state accordingly.
   setTime(true);
-  gpio_put(BLUE_LED, false);
+  gpio_put(WHITE_LED, false);
   datetime_t t;
   rtc_get_datetime(&t);
   int sunset = computeSunset(getYearDay(t), t.year);
@@ -204,13 +204,13 @@ int main()
     sunset = computeSunset(getYearDay(t), t.year);
     if (lamp_on) {
       printf("main:  Lamp was ON.  Toggling OFF.");
-      gpio_put(RELAY, false);
-      gpio_put(BLUE_LED, false);
+      gpio_put(RELAY, true);
+      gpio_put(WHITE_LED, false);
       sleep_time = sunset - minuteOfDay(t);
     } else {
       printf("main:  Lamp was OFF.  Toggling ON.");
-      gpio_put(RELAY, true);
-      gpio_put(BLUE_LED, true);
+      gpio_put(RELAY, false);
+      gpio_put(WHITE_LED, true);
       sleep_time = (minuteOfDay(t) <= TWO_OCLOCK_MINUTES) ?
           (TWO_OCLOCK_MINUTES - minuteOfDay(t)) : (24 * 60 - minuteOfDay(t) + TWO_OCLOCK_MINUTES);
     }

@@ -21,8 +21,10 @@
 constexpr std::string_view NTP_SERVER = "pool.ntp.org";
 constexpr size_t NTP_MSG_LEN = 48;
 constexpr unsigned short NTP_PORT = 123;
-constexpr unsigned int NTP_DELTA = 2208988800;  // seconds between 1 Jan 1900 and 1 Jan 1970
-constexpr unsigned int EST_DELTA = 18000;  // Offset from EST to GMT
+constexpr time_t NTP_ERA1_DELTA = 2208988800;  // seconds between 1 Jan 1900 and 1 Jan 1970
+constexpr time_t NTP_ERA2_DELTA = -2082758400;  // seconds between 1 Jan 2036 and 1 Jan 1970
+constexpr time_t EST_DELTA = 18000;  // Offset from EST to GMT
+constexpr time_t NTP_ERA_DIVIDER_SECONDS = 3900000000;  // If NTP reports seconds less than this, we are in 2nd (2036) era.
 #define NTP_TEST_TIME (30 * 1000)
 #define NTP_RESEND_TIME (10 * 1000)
 
@@ -109,15 +111,21 @@ static void ntp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
     printf("ntp_recv:  NTP SUCCESS!!!\n");
     uint8_t seconds_buf[4] = {0};
     pbuf_copy_partial(p, seconds_buf, sizeof(seconds_buf), 40);
-    uint32_t seconds_since_1900 = seconds_buf[0] << 24 | seconds_buf[1] << 16 | seconds_buf[2] << 8 | seconds_buf[3];
-    printf("ntp_recv:  seconds since 1900 = %u\n", seconds_since_1900);
-    uint32_t seconds_since_1970 = seconds_since_1900 - NTP_DELTA;
-    printf("ntp_recv:  seconds since 1970 = %u\n", seconds_since_1970);
-    printf("ntp_recv:  EST seconds since 1970 = %u\n", seconds_since_1970 - EST_DELTA);
+    time_t seconds_since_era_start = static_cast<time_t>(
+        static_cast<unsigned int>(seconds_buf[0]) << 24
+        | static_cast<unsigned int>(seconds_buf[1]) << 16
+        | static_cast<unsigned int>(seconds_buf[2]) << 8
+        | static_cast<unsigned int>(seconds_buf[3]) << 0);
+    bool first_era = seconds_since_era_start > NTP_ERA_DIVIDER_SECONDS;
+    printf("ntp_recv:  we are in the %s era.\n", first_era ? "first" : "second");
+    printf("ntp_recv:  seconds since era start = %lld\n", seconds_since_era_start);
+    time_t seconds_since_1970 = seconds_since_era_start - (first_era ? NTP_ERA1_DELTA : NTP_ERA2_DELTA);
+    printf("ntp_recv:  seconds since 1970 = %lld\n", seconds_since_1970);
+    printf("ntp_recv:  EST seconds since 1970 = %lld\n", seconds_since_1970 - EST_DELTA);
     time_t epoch = static_cast<time_t>(seconds_since_1970 - EST_DELTA);
-    printf("ntp_recv:  size of time_t = %u,  epoch seconds = %ld\n", sizeof(epoch), epoch);
+    printf("ntp_recv:  size of time_t = %u,  epoch seconds = %lld\n", sizeof(epoch), epoch);
     tm* ptm = gmtime(&epoch);
-    printf("ntp_recv:  tm.year = *d, tm.yday = %d\n", ptm->tm_year, ptm->tm_yday);
+    printf("ntp_recv:  tm.year = %d, tm.yday = %d\n", ptm->tm_year, ptm->tm_yday);
    
     state->result = {epoch, *gmtime(&epoch)};
     state->err = NTP_ERR_CODE::NTP_ERR_OK;
