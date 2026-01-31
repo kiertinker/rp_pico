@@ -87,6 +87,11 @@ constexpr int GREEN_LED = 7;
 constexpr int WHITE_LED = 3;
 constexpr int RELAY = 26;
 
+void setPin(int pin, bool state) {
+  printf("setPin:  Setting Pin %d to %s\n", pin, state ? "true" : "false");
+  gpio_put(pin, state);
+}
+
 void initGpio() {
   for (auto& pin : { RED_LED, GREEN_LED, WHITE_LED, RELAY }) {
     printf("initGpio:  Initing Pin %d\n", pin);
@@ -98,10 +103,10 @@ void initGpio() {
 
 void initPins() {
   initGpio();
-  gpio_put(RED_LED, true);
-  gpio_put(GREEN_LED, true);
-  gpio_put(WHITE_LED, true);
-  gpio_put(RELAY, true);  // Relay off at init (active low)
+  setPin(RED_LED, true);
+  setPin(GREEN_LED, true);
+  setPin(WHITE_LED, true);
+  setPin(RELAY, true);  // Relay off at init (active low)
 }
 
 constexpr int TWO_OCLOCK_MINUTES = 120;
@@ -126,18 +131,18 @@ bool setTime(bool init) {
     if (err != NTP_ERR_CODE::NTP_ERR_OK) {
       printf("setTime:  getNtpTime Failed!!!\n");
       if (!pins_set) {
-        gpio_put(RED_LED, true);
+        setPin(RED_LED, true);
         if (init) {
-          gpio_put(GREEN_LED, false);
-          gpio_put(WHITE_LED, false);
+          setPin(GREEN_LED, false);
+          setPin(WHITE_LED, false);
         }
         pins_set = true;
       }
     } else printf("setTime:  Got NTP Time!!!\n");
   } while ((init || --retries) && err != NTP_ERR_CODE::NTP_ERR_OK);
   if (err == NTP_ERR_CODE::NTP_ERR_OK) {
-    gpio_put(RED_LED, false);
-    gpio_put(GREEN_LED, true);
+    setPin(RED_LED, false);
+    setPin(GREEN_LED, true);
     printf("NTP time tm: year = %d, mon = %d, mday = %d, hour = %d, min = %d\n", result.time.tm_year, result.time.tm_mon, result.time.tm_mday, result.time.tm_hour, result.time.tm_min);
     datetime_t t = {
         .year = static_cast<short>(result.time.tm_year + ((result.time.tm_year < 126) ? 2036 : 1900)),  // tm_year is years since 1900.
@@ -176,7 +181,7 @@ int main()
   //      This enables the main loop to toggle LEDs to the current desired state
   //      and set the sleep timer to the next state accordingly.
   setTime(true);
-  gpio_put(WHITE_LED, false);
+  setPin(WHITE_LED, false);
   datetime_t t;
   rtc_get_datetime(&t);
   int sunset = computeSunset(getYearDay(t), t.year);
@@ -191,11 +196,12 @@ int main()
   while (true) {
     // Resync the clock to NTP time every 10 days.
     if (++days_since_time_sync > 10) {
+      printf("main:  Resyncing time with NTP server.\n");
       if (setTime(false)) {
         days_since_time_sync = 0;
-        gpio_put(RED_LED, false);
+        setPin(RED_LED, false);
       } else {
-        gpio_put(RED_LED, true);
+        setPin(RED_LED, true);
       }
     }
     // If the lamp is currently on then we need to turn it off and sleep until it is time to turn it off
@@ -204,13 +210,13 @@ int main()
     sunset = computeSunset(getYearDay(t), t.year);
     if (lamp_on) {
       printf("main:  Lamp was ON.  Toggling OFF.");
-      gpio_put(RELAY, true);
-      gpio_put(WHITE_LED, false);
+      setPin(RELAY, true);
+      setPin(WHITE_LED, false);
       sleep_time = sunset - minuteOfDay(t);
     } else {
       printf("main:  Lamp was OFF.  Toggling ON.");
-      gpio_put(RELAY, false);
-      gpio_put(WHITE_LED, true);
+      setPin(RELAY, false);
+      setPin(WHITE_LED, true);
       sleep_time = (minuteOfDay(t) <= TWO_OCLOCK_MINUTES) ?
           (TWO_OCLOCK_MINUTES - minuteOfDay(t)) : (24 * 60 - minuteOfDay(t) + TWO_OCLOCK_MINUTES);
     }

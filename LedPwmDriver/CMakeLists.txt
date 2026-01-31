@@ -35,7 +35,11 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(LedPwmDriver LedPwmDriver.cpp )
+add_executable(LedPwmDriver
+    LedPwmDriver.cpp
+    pwm_config_buffer_manager.cpp
+    gatt_service.cpp
+)
 
 pico_set_program_name(LedPwmDriver "LedPwmDriver")
 pico_set_program_version(LedPwmDriver "0.1")
@@ -44,21 +48,32 @@ pico_set_program_version(LedPwmDriver "0.1")
 pico_enable_stdio_uart(LedPwmDriver 0)
 pico_enable_stdio_usb(LedPwmDriver 1)
 
+target_compile_definitions(LedPwmDriver PRIVATE CYW43_ENABLE_BLUETOOTH=1)
+
+# Generate the GATT header file
+pico_btstack_make_gatt_header(LedPwmDriver PRIVATE "${CMAKE_CURRENT_LIST_DIR}/gatt_led_pwm_control_server.gatt")
+
 # Add the standard library to the build
 target_link_libraries(LedPwmDriver
-        pico_stdlib)
+    hardware_flash
+    pico_stdlib
+    pico_btstack_ble
+    pico_btstack_cyw43
+    pico_cyw43_arch_none
+    pico_bootsel_via_double_reset
+)
 
 # Add the standard include files to the build
 target_include_directories(LedPwmDriver PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}
 )
 
 # Add any user requested libraries
 target_link_libraries(LedPwmDriver 
-        hardware_timer
-        hardware_clocks
-        pico_cyw43_arch_lwip_threadsafe_background
-        )
+    hardware_timer
+    hardware_clocks
+    # pico_cyw43_arch_lwip_threadsafe_background
+)
 
 pico_add_extra_outputs(LedPwmDriver)
 

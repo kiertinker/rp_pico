@@ -141,15 +141,15 @@ static void ntp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
 NTP_ERR_CODE getNtpTime(TimeResult &result) {
   sleep_ms(5000);
   printf("getNtpTime...\n");
-  if (cyw43_arch_init()) {
-    printf("failed to initialise\n");
+  if (int error_code = cyw43_arch_init(); error_code != 0) {
+    printf("getNtpTime:  cyw43 arch failed to initialize with pico error code %d\n", error_code);
     return NTP_ERR_CODE::NTP_ERR_WIFI_INIT_FAILURE;
   }
 
   cyw43_arch_enable_sta_mode();
 
-  if (cyw43_arch_wifi_connect_timeout_ms("JKATHOME", "06061969AD", CYW43_AUTH_WPA2_AES_PSK, 10000)) {
-    printf("failed to connect\n");
+  if (int error_code = cyw43_arch_wifi_connect_timeout_ms("JKATHOME", "06061969AD", CYW43_AUTH_WPA2_AES_PSK, 10000); error_code != 0) {
+    printf("getNtpTime:  wifi connect failed with pico error code %d\n", error_code);
     return NTP_ERR_CODE::NTP_ERR_WIFI_CONNECT_FAILURE;
   }
   std::variant<NTP_ERR_CODE, ip_addr_t> dns_result = getIpAddrFromHostname(NTP_SERVER);
@@ -166,14 +166,18 @@ NTP_ERR_CODE getNtpTime(TimeResult &result) {
     ntpRequest(state); // Cached result
     if (!mutex_enter_timeout_ms(&state.mtx, 10000)) {
       printf("getNtpTime:  Timed out waiting for response.\n");
-      mutex_exit(&state.mtx);
       state.err = NTP_ERR_CODE::NTP_ERR_TIMEOUT;
     }
+    // Either we re-entered the mutex because of a successful response, or we timed out.
+    // Either way, we are still holding the mutex here and need to release it.
+    mutex_exit(&state.mtx);
     if (state.err == NTP_ERR_CODE::NTP_ERR_OK) {
       printf("getNtpTime:  Successful exit.\n");
       break;
     }
   } while (--retries);
+
+  cyw43_arch_disable_sta_mode();
   cyw43_arch_deinit();
   if (state.err == NTP_ERR_CODE::NTP_ERR_OK) {
     printf("got ntp response (%lld): %02d/%02d/%04d %02d:%02d:%02d\n", state.result.seconds_since_epoch, state.result.time.tm_mday, state.result.time.tm_mon + 1, state.result.time.tm_year + 1900,
