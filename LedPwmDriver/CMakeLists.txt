@@ -36,9 +36,10 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(LedPwmDriver
-    LedPwmDriver.cpp
-    pwm_config_buffer_manager.cpp
     gatt_service.cpp
+    main.cpp
+    pwm_config_buffer_manager.cpp
+    pwm_driver.cpp
 )
 
 pico_set_program_name(LedPwmDriver "LedPwmDriver")
@@ -56,11 +57,12 @@ pico_btstack_make_gatt_header(LedPwmDriver PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ga
 # Add the standard library to the build
 target_link_libraries(LedPwmDriver
     hardware_flash
-    pico_stdlib
+    pico_bootsel_via_double_reset
     pico_btstack_ble
     pico_btstack_cyw43
     pico_cyw43_arch_none
-    pico_bootsel_via_double_reset
+    pico_multicore
+    pico_stdlib
 )
 
 # Add the standard include files to the build
