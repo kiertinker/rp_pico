@@ -9,6 +9,7 @@
 #define ENABLE_LE_PERIPHERAL
 #define ENABLE_LOG_INFO
 #define ENABLE_LOG_ERROR
+#define ENABLE_LOG_DEBUG  // added
 #define ENABLE_PRINTF_HEXDUMP
 
 // for the client
@@ -45,6 +46,8 @@
 
 // We don't give btstack a malloc, so use a fixed-size ATT DB.
 #define MAX_ATT_DB_SIZE 512
+
+#define DISABLE_BT_FLASH
 
 // BTstack HAL configuration
 #define HAVE_EMBEDDED_TIME_MS

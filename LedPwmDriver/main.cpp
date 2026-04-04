@@ -12,11 +12,17 @@
 
 int main() {
   stdio_init_all();
+  sleep_ms(5000);
+  for (int i = 5; i > 0; --i) {
+    printf("Starting in %d seconds...\n", i);
+    sleep_ms(1000);
+  }
+  printf("Starting main function...\n");
   
   // Example GPIO pins for two RGBW channels
   std::unique_ptr<IPwmDriver> driver(ledPwmDriverInit());
   std::unique_ptr<PwmConfigDataInterface> dataInterface(pwmConfigDataInterfaceInit(driver.get()));
-  std::variant<CustomServiceInterface*, CustomServiceErrorCode> serviceInitResult = customServiceServerInit(dataInterface->getCharacteristicValuePtrs(), driver.get());
+  std::variant<CustomServiceInterface*, CustomServiceErrorCode> serviceInitResult = customServiceServerInit(dataInterface.get());
   if (std::holds_alternative<CustomServiceErrorCode>(serviceInitResult)) {
     // Handle error case (e.g., log the error code)
     CustomServiceErrorCode error_code = std::get<CustomServiceErrorCode>(serviceInitResult);

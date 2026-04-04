@@ -5,14 +5,17 @@
 #include "bluetooth_gatt.h"
 #include "btstack.h"
 #include "btstack_defines.h"
+#include "btstack_tlv.h"
 #include "btstack_util.h"
 #include "btstack_debug.h"
 #include "pico/btstack_cyw43.h"
 #include "pico/cyw43_arch.h"
+#include "pico/stdlib.h"
 
 #include "gatt_led_pwm_control_server.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <array>
 #include <functional>
 #include <optional>
@@ -40,43 +43,181 @@ constexpr std::array<uint8_t, 23> adv_data = {
 
 constexpr size_t NUM_CHARACTERISTICS = 6;
 
-// HCI packet handler
-void packet_handler(uint8_t packet_type, [[maybe_unused]] uint16_t channel, uint8_t *packet, [[maybe_unused]] uint16_t size) {
-  bd_addr_t local_addr;
+// // HCI packet handler
+// void packet_handler(uint8_t packet_type, [[maybe_unused]] uint16_t channel, uint8_t *packet, [[maybe_unused]] uint16_t size) {
+//   bd_addr_t local_addr;
+//   printf("Packet handler called with packet type: %d, channel: %d\n", packet_type, channel);
+//   if (packet_type != HCI_EVENT_PACKET) return;
+//   // Retrieve event type from HCI packet
+//   uint8_t event_type = hci_event_packet_get_type(packet);
+//   printf("Packet handler called with event type: %d\n", event_type);
+//   uint16_t conn_interval;
+//   hci_con_handle_t con_handle;
+//   static const char * const phy_names[] = { "Reserved", "1 M", "2 M", "Codec" };
+//   // Switch on event type . . .
+//   switch(event_type) {
+//     // Setup GAP advertisement
+//     case BTSTACK_EVENT_STATE: {
+//       if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
+//       gap_local_bd_addr(local_addr);
+//       printf("BTstack up and running on %s.\n", bd_addr_to_str(local_addr));
+//       // setup advertisements
+//       uint16_t adv_int_min = 800;
+//       uint16_t adv_int_max = 800;
+//       uint8_t adv_type = 0;
+//       bd_addr_t null_addr;
+//       memset(null_addr, 0, 6);
+//       gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
+//       assert(adv_data.size() <= 31); // ble limitation
+//       gap_advertisements_set_data(adv_data.size(), (uint8_t*) adv_data.data());
+//       gap_advertisements_enable(1);
+//       break;
+//     }
+//   case HCI_EVENT_DISCONNECTION_COMPLETE:
+//     con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
+//     printf("- LE Connection 0x%04x: disconnect, reason %02x\n", con_handle, hci_event_disconnection_complete_get_reason(packet));
+//     break;
+//   case HCI_EVENT_META_GAP:
+//     switch (hci_event_gap_meta_get_subevent_code(packet)) {
+//     case GAP_SUBEVENT_LE_CONNECTION_COMPLETE:
+//       // print connection parameters (without using float operations)
+//       con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+//       conn_interval = gap_subevent_le_connection_complete_get_conn_interval(packet);
+//       printf("- LE Connection 0x%04x: connected - connection interval %u.%02u ms, latency %u\n", con_handle, conn_interval * 125 / 100, 25 * (conn_interval & 3), gap_subevent_le_connection_complete_get_conn_latency(packet));
+//       // request min con interval 15 ms for iOS 11+
+//       printf("- LE Connection 0x%04x: request 15 ms connection interval\n", con_handle);
+//       gap_request_connection_parameter_update(con_handle, 12, 12, 4, 0x0048);
+//       break;
+//     default:
+//       break;
+//     }
+//     break;
+//   case HCI_EVENT_LE_META:
+//     switch (hci_event_le_meta_get_subevent_code(packet)) {
+//     case HCI_SUBEVENT_LE_CONNECTION_UPDATE_COMPLETE:
+//       // print connection parameters (without using float operations)
+//       con_handle = hci_subevent_le_connection_update_complete_get_connection_handle(packet);
+//       conn_interval = hci_subevent_le_connection_update_complete_get_conn_interval(packet);
+//       printf("- LE Connection 0x%04x: connection update - connection interval %u.%02u ms, latency %u\n", con_handle, conn_interval * 125 / 100, 25 * (conn_interval & 3), hci_subevent_le_connection_update_complete_get_conn_latency(packet));
+//       break;
+//     case HCI_SUBEVENT_LE_DATA_LENGTH_CHANGE:
+//       con_handle = hci_subevent_le_data_length_change_get_connection_handle(packet);
+//       printf("- LE Connection 0x%04x: data length change - max %u bytes per packet\n", con_handle, hci_subevent_le_data_length_change_get_max_tx_octets(packet));
+//       break;
+//     case HCI_SUBEVENT_LE_PHY_UPDATE_COMPLETE:
+//       con_handle = hci_subevent_le_phy_update_complete_get_connection_handle(packet);
+//       printf("- LE Connection 0x%04x: PHY update - using LE %s PHY now\n", con_handle, phy_names[hci_subevent_le_phy_update_complete_get_tx_phy(packet)]);
+//       break;
+//     default:
+//       break;
+//     }
+//     break;
+
+//   default:
+//     break;
+//   }
+// }
+// btstack_packet_callback_registration_t hci_event_callback_registration;
+
+/* ---------------------------------------------------------------
+ * Globals
+ * ---------------------------------------------------------------*/
+static hci_con_handle_t connection_handle = HCI_CON_HANDLE_INVALID;
+static btstack_packet_callback_registration_t hci_event_callback_registration;
+
+/* ---------------------------------------------------------------
+ * Forward declarations
+ * ---------------------------------------------------------------*/
+static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size);
+
+/* ---------------------------------------------------------------
+ * HCI packet handler
+ * ---------------------------------------------------------------*/
+static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+  UNUSED(channel);
+  UNUSED(size);
   if (packet_type != HCI_EVENT_PACKET) return;
-  // Retrieve event type from HCI packet
-  uint8_t event_type = hci_event_packet_get_type(packet);
-  // Switch on event type . . .
-  switch(event_type) {
-    // Setup GAP advertisement
-    case BTSTACK_EVENT_STATE: {
-      if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
+  uint8_t event_code = hci_event_packet_get_type(packet);
+  switch (event_code) {
+  /* ----------------------------------------------------------
+   * Stack initialised / controller powered up.
+   * Start BLE advertisements once the stack is working.
+   * ---------------------------------------------------------- */
+  case BTSTACK_EVENT_STATE:
+    if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
+      bd_addr_t local_addr;
       gap_local_bd_addr(local_addr);
-      printf("BTstack up and running on %s.\n", bd_addr_to_str(local_addr));
-      // setup advertisements
-      uint16_t adv_int_min = 800;
-      uint16_t adv_int_max = 800;
-      uint8_t adv_type = 0;
-      bd_addr_t null_addr;
-      memset(null_addr, 0, 6);
-      gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
-      assert(adv_data.size() <= 31); // ble limitation
-      gap_advertisements_set_data(adv_data.size(), (uint8_t*) adv_data.data());
+      printf("[BLE] Stack working – addr: %s\n", bd_addr_to_str(local_addr));
       gap_advertisements_enable(1);
-      break;
     }
-    // Disconnected from a client
-    case HCI_EVENT_DISCONNECTION_COMPLETE:
-      break;
-    // Ready to send ATT
-    case ATT_EVENT_CAN_SEND_NOW:
+    break;
+  /* ----------------------------------------------------------
+   * BLE connection established (LE Meta – Connection Complete).
+   * ---------------------------------------------------------- */
+  case HCI_EVENT_LE_META:
+    {
+      if (hci_event_le_meta_get_subevent_code(packet) != HCI_SUBEVENT_LE_CONNECTION_COMPLETE) {
+        printf("[BLE] LE Meta event received, but not connection complete – subevent code: %d\n", hci_event_le_meta_get_subevent_code(packet));
+        break;
+      }
+
+      uint8_t status = hci_subevent_le_connection_complete_get_status(packet);
+      if (status != ERROR_CODE_SUCCESS) {
+        printf("[BLE] Connection failed, status 0x%02x\n", status);
+        break;
+      }
+      connection_handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
+      bd_addr_t remote_addr;
+      hci_subevent_le_connection_complete_get_peer_address(packet, remote_addr);
+      printf("[BLE] Connected: handle=0x%04x  addr=%s\n", connection_handle, bd_addr_to_str(remote_addr));
+      /* Stop advertising while a central is connected. */
+      gap_advertisements_enable(0);
+    }
+    break;
+  /* ----------------------------------------------------------
+   * BLE connection torn down.
+   * ---------------------------------------------------------- */
+  case HCI_EVENT_DISCONNECTION_COMPLETE: {
+    hci_con_handle_t handle = hci_event_disconnection_complete_get_connection_handle(packet);
+    uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+    printf("[BLE] Disconnected: handle=0x%04x  reason=0x%02x\n", handle, reason);
+    if (handle == connection_handle)
+      connection_handle = HCI_CON_HANDLE_INVALID;
+    /* Resume advertising so a new central can connect. */
+    gap_advertisements_enable(1);
+    break;
+  }
+
+  case HCI_EVENT_META_GAP:
+    switch (hci_event_gap_meta_get_subevent_code(packet)) {
+    case GAP_SUBEVENT_LE_CONNECTION_COMPLETE:
+      // print connection parameters (without using float operations)
+      {
+        hci_con_handle_t con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+        uint16_t conn_interval = gap_subevent_le_connection_complete_get_conn_interval(packet);
+        printf("[BLE] Connection update: handle=0x%04x  interval=%u.%02u ms  latency=%u\n", con_handle, conn_interval * 125 / 100, 25 * (conn_interval & 3), gap_subevent_le_connection_complete_get_conn_latency(packet));
+      }
       break;
     default:
       break;
+    }
+    break;
+  /* ----------------------------------------------------------
+   * BLE SM pairing complete (informational).
+   * With just-works / no-bonding this fires but requires no action.
+   * ---------------------------------------------------------- */
+  case SM_EVENT_JUST_WORKS_REQUEST:
+    printf("[BLE] SM just-works request – accepting\n");
+    sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+    break;
+  case SM_EVENT_PAIRING_COMPLETE:
+    printf("[BLE] Pairing complete, status=0x%02x\n", sm_event_pairing_complete_get_status(packet));
+    break;
+  default:
+    printf("[BLE] Unhandled event: 0x%02x\n", event_code);
+    break;
   }
 }
-
-btstack_packet_callback_registration_t hci_event_callback_registration;
 
 class CustomServiceCharacteristic {
  public:
@@ -108,7 +249,7 @@ class CustomServiceCharacteristic {
   void setValues(CharacteristicValues& values) { characteristic_values_ = std::move(values); }
   std::optional<uint16_t> customServiceCharacteristicRead(
       /*hci_con_handle_t*/ uint16_t con_handle, uint16_t attribute_handle, uint16_t offset, unsigned char* buffer, uint16_t buffer_size);
-  std::variant<std::monostate, unsigned int, std::reference_wrapper<std::vector<uint8_t>&>> customServiceCharacteristicWrite(
+  std::variant<std::monostate, unsigned int, uint8_t*> customServiceCharacteristicWrite(
       /*hci_con_handle_t*/ uint16_t con_handle, uint16_t attribute_handle, uint16_t transaction_mode, uint16_t offset, uint8_t *buffer, uint16_t buffer_size);
 };
 // Struct for managing this service
@@ -128,8 +269,7 @@ class CustomService : public CustomServiceInterface {
 
   ~CustomService() { getInstance(GetInstanceCmd::CLEAR_INSTANCE); }
   
-  CustomServiceErrorCode init(
-      std::array<std::pair<unsigned char*, size_t>, 6>& characteristic_value_ptrs, CharacteristicUpdateListener* update_listener);
+  CustomServiceErrorCode init(CharacteristicUpdateListener* update_listener);
 
  private:
   CustomService() = default;
@@ -141,19 +281,18 @@ int CustomService::customServiceWriteCallback(
     hci_con_handle_t con_handle, uint16_t attribute_handle, uint16_t transaction_mode, uint16_t offset, uint8_t *buffer, uint16_t buffer_size) {
   CustomService* instance = CustomService::getInstance(CustomService::GetInstanceCmd::GET_EXISTING_INSTANCE);
   for (auto& characteristic : instance->characteristics_) {
-    std::variant<std::monostate, unsigned int, std::reference_wrapper<std::vector<uint8_t>&>> result =
-        characteristic.customServiceCharacteristicWrite(con_handle, attribute_handle, transaction_mode, offset, buffer, buffer_size);
+    auto result = characteristic.customServiceCharacteristicWrite(con_handle, attribute_handle, transaction_mode, offset, buffer, buffer_size);
     switch (result.index()) {
       case 0: // std::monostate, meaning the handle didn't match this characteristic, so we should keep looking.
         continue;
       case 1: // unsigned int, meaning the handle matched and there was an error, so we should stop processing and return that error.
         return std::get<unsigned int>(result);
-      case 2: // std::vector<uint8_t>&, meaning the handle matched and the write was successful, so we should process the new value and then stop processing and return success.
+      case 2: // uint8_t*, meaning the handle matched and the write was successful, so we should process the new value and then stop processing and return success.
         // If the write was successful and we have an update listener, notify it of the change.
         if (instance->update_listener_ != nullptr) {
-          std::vector<uint8_t>& new_value = std::get<std::reference_wrapper<std::vector<uint8_t>&>>(result);
+          uint8_t* new_value = std::get<uint8_t*>(result);
           // We can ignore the value and size parameters here since the listener can read the updated value directly from the characteristic's value pointer if needed.
-          (*instance->update_listener_)(CustomServiceCharacteristicIndex(&characteristic - &instance->characteristics_[0]), new_value.data(), new_value.size());
+          (*instance->update_listener_)(CustomServiceCharacteristicIndex(&characteristic - &instance->characteristics_[0]), new_value, buffer_size);
         }
     }
     return 0; // Indicate success for the write operation.
@@ -163,6 +302,7 @@ int CustomService::customServiceWriteCallback(
 
 uint16_t CustomService::customServiceReadCallback(hci_con_handle_t con_handle, uint16_t attribute_handle, uint16_t offset, uint8_t * buffer, uint16_t buffer_size){
   CustomService* instance = CustomService::getInstance(CustomService::GetInstanceCmd::GET_EXISTING_INSTANCE);
+  printf("Read callback called with handle: 0x%04x, offset: %d, buffer size: %d\n", attribute_handle, offset, buffer_size);
   for (auto& characteristic : instance->characteristics_)
     if (auto result = characteristic.customServiceCharacteristicRead(con_handle, attribute_handle, offset, buffer, buffer_size); result.has_value())
       return result.value();
@@ -170,7 +310,7 @@ uint16_t CustomService::customServiceReadCallback(hci_con_handle_t con_handle, u
 }
 
 // Write callback
-std::variant<std::monostate, unsigned int, std::reference_wrapper<std::vector<uint8_t>&>> CustomServiceCharacteristic::customServiceCharacteristicWrite(hci_con_handle_t con_handle, uint16_t attribute_handle, uint16_t transaction_mode, uint16_t offset, uint8_t *buffer, uint16_t buffer_size){
+std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic::customServiceCharacteristicWrite(hci_con_handle_t con_handle, uint16_t attribute_handle, uint16_t transaction_mode, uint16_t offset, uint8_t *buffer, uint16_t buffer_size){
   static std::vector<uint8_t> staging_buffer(256); // Temporary staging buffer for writes
   // Enable/disable notifications
   if (attribute_handle == characteristic_handles_.client_configuration_handle){
@@ -191,35 +331,37 @@ std::variant<std::monostate, unsigned int, std::reference_wrapper<std::vector<ui
         if ((attribute_handle == ATT_CHARACTERISTIC_D10DAD41_F565_11F0_AB18_8CF8C5822DAE_01_VALUE_HANDLE) &&
             // Example: Validate that mode selection is within expected range (0-4)
             (buffer[0] > 4))
-              return 0U;  // Invalid mode, but fail silently.
+          return 0U;  // Invalid mode, but fail silently.
         memcpy(characteristic_values_.value.data() + offset, buffer, buffer_size);
         break;
+
       case ATT_TRANSACTION_MODE_ACTIVE:
         // Store data in staging buffer
         if (offset + buffer_size > staging_buffer.size()) {
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_OFFSET; // Indicate error
         }
-        break;
+        return 0U;
+
       case ATT_TRANSACTION_MODE_VALIDATE:
         if (offset + buffer_size != characteristic_values_.value.size()) {
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH; // Indicate error
         }
         memcpy(staging_buffer.data() + offset, buffer, buffer_size);
-        break;
+        return 0U;
+
       case ATT_TRANSACTION_MODE_EXECUTE:
         memcpy(characteristic_values_.value.data(), staging_buffer.data(), characteristic_values_.value.size());
         break;
 
       case ATT_TRANSACTION_MODE_CANCEL:
-        /* code */
-        break;
+        return 0U;
     
       default:
-        break;
+        return 0U; // Invalid transaction mode, indicate error.
     }
-    return 0U;
+    return characteristic_values_.value.data(); // Indicate success and provide pointer to new value. 
   }
   return std::monostate{};  // Couldn't find the handle, so returning empty variant to indicate no action taken.
 }
@@ -238,6 +380,7 @@ CustomService* CustomService::getInstance(GetInstanceCmd cmd) {
   static CustomService* instance = nullptr;
 
   if (cmd == GetInstanceCmd::CREATE_INSTANCE && instance == nullptr) {
+    printf("Creating CustomService instance...\n");
     instance = new CustomService();
   } else if (cmd == GetInstanceCmd::CLEAR_INSTANCE && instance != nullptr) {
     delete instance;
@@ -246,14 +389,29 @@ CustomService* CustomService::getInstance(GetInstanceCmd cmd) {
   return instance;
 }
 
-CustomServiceErrorCode CustomService::init(
-    std::array<std::pair<unsigned char*, size_t>, 6>& characteristic_value_ptrs, CharacteristicUpdateListener* update_listener) {
+CustomServiceErrorCode CustomService::init(CharacteristicUpdateListener* update_listener) {
+  static btstack_packet_callback_registration_t att_event_callback_registration;
+
+  printf("Initializing custom GATT service...\n");
+  // // Supplanting the TLV implementation that BTstack uses for storing link keys and device info with a dummy implementation that does nothing,
+  // // since we don't need that functionality and its flash usage complicates the pwm implementation on the second core.
+  // printf("Setting dummy TLV instance for BTstack...\n");
+  // const btstack_tlv_t * tlv_impl = btstack_tlv_dummy_get_instance();
+  // btstack_tlv_set_instance(tlv_impl, NULL); // Second param is context, not needed here
+  // printf("Dummy TLV instance set for BTstack.\n");
+
+  printf("Initializing Bluetooth hardware...\n");
   // Initialise the BT/Wi-Fi chip
   if (int fail_code = cyw43_arch_init(); fail_code != 0) {
     printf("Bluetooth init failed with code %d\n", fail_code);
     return CustomServiceErrorCode::CYW43_ARCH_INIT_FAILED;
   }
+  printf("Bluetooth hardware initialized successfully.\n");
 
+  l2cap_init();
+  printf("L2CAP initialized successfully.\n");
+
+  const std::array<std::pair<unsigned char*, size_t>, 6>& characteristic_value_ptrs = update_listener->getCharacteristicValuePtrs();
   constexpr std::array<CustomServiceCharacteristic::CharacteristicHandles, 6> characteristic_handles_array = {{
     {ATT_CHARACTERISTIC_D10DAD41_F565_11F0_AB18_8CF8C5822DAE_01_VALUE_HANDLE, ATT_CHARACTERISTIC_D10DAD41_F565_11F0_AB18_8CF8C5822DAE_01_CLIENT_CONFIGURATION_HANDLE, ATT_CHARACTERISTIC_D10DAD41_F565_11F0_AB18_8CF8C5822DAE_01_USER_DESCRIPTION_HANDLE},
     {ATT_CHARACTERISTIC_DC7065C1_F565_11F0_AE0B_8CF8C5822DAE_01_VALUE_HANDLE, ATT_CHARACTERISTIC_DC7065C1_F565_11F0_AE0B_8CF8C5822DAE_01_CLIENT_CONFIGURATION_HANDLE, ATT_CHARACTERISTIC_DC7065C1_F565_11F0_AE0B_8CF8C5822DAE_01_USER_DESCRIPTION_HANDLE},
@@ -280,33 +438,66 @@ CustomServiceErrorCode CustomService::init(
     characteristics_[i].setValues(temp);
   }
 
+  printf("Custom GATT service characteristics initialized successfully.\n");
 
-  // Service start and end handles (modeled off heartrate example)
-  service_handler.start_handle = 0 ;
-  service_handler.end_handle = 0xFFFF ;
-  service_handler.read_callback = &customServiceReadCallback ;
-  service_handler.write_callback = &customServiceWriteCallback ;
-  // Register the service handler
-  att_server_register_service_handler(&service_handler);
+  // // Service start and end handles (modeled off heartrate example)
+  // service_handler.start_handle = 0 ;
+  // service_handler.end_handle = 0xFFFF ;
+  // service_handler.read_callback = &customServiceReadCallback ;
+  // service_handler.write_callback = &customServiceWriteCallback ;
+  // // Register the service handler
+  // att_server_register_service_handler(&service_handler);
   // inform about BTstack state
-  hci_event_callback_registration.callback = &packet_handler;
+  // hci_event_callback_registration.callback = &packet_handler;
+  // hci_add_event_handler(&hci_event_callback_registration);
+
+  att_event_callback_registration.callback = &hci_packet_handler;
+  att_server_register_packet_handler(&hci_packet_handler);  //&att_event_callback_registration);
+  /*
+   * BLE-only security manager: just-works, no bonding, no MITM.
+   * sm_set_io_capabilities / sm_set_authentication_requirements
+   * govern BLE pairing exclusively (classic BT is disabled).
+   */
+  sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+  sm_set_authentication_requirements(0);   /* No bonding, no MITM */
+  // /* Disable classic BT so only BLE is active. */
+  // hci_disable_classic();
+
+  
+  att_server_init(profile_data, &customServiceReadCallback, &customServiceWriteCallback);
+  printf("ATT server initialized successfully.\n");
+
+
+  hci_event_callback_registration.callback = &hci_packet_handler;
   hci_add_event_handler(&hci_event_callback_registration);
+
+  /* Load advertisement data and set parameters. */
+  gap_advertisements_set_data(adv_data.size(), (uint8_t*) adv_data.data());
+  gap_advertisements_set_params(
+    0x00A0,   /* min interval: 100 ms  (units: 0.625 ms) */
+    0x00A0,   /* max interval: 100 ms                    */
+    0 /*ADV_IND*/,  /* connectable undirected                  */
+    0,        /* own address type: public                */
+    NULL,  /* no whitelist                            */
+    0x07,     /* all channels (37, 38, 39)               */
+    0         /* no filter policy                        */
+  );
   
   // register for ATT event
-  att_server_register_packet_handler(packet_handler);
+  att_server_register_packet_handler(hci_packet_handler);
   
   // turn on bluetooth!
   hci_power_control(HCI_POWER_ON);
   update_listener_ = update_listener;
+  printf("Custom GATT service initialized successfully.\n");
   return CustomServiceErrorCode::ERROR_OK;
 }
 
 } // anonymous namespace
 
-std::variant<CustomServiceInterface*, CustomServiceErrorCode> customServiceServerInit(
-    std::array<std::pair<unsigned char*, size_t>, 6>& characteristic_value_ptrs, CharacteristicUpdateListener* update_listener) {
+std::variant<CustomServiceInterface*, CustomServiceErrorCode> customServiceServerInit(CharacteristicUpdateListener* update_listener) {
   CustomService* service_instance = CustomService::getInstance(CustomService::GetInstanceCmd::CREATE_INSTANCE);
-  if (CustomServiceErrorCode error_code = service_instance->init(characteristic_value_ptrs, update_listener);
+  if (CustomServiceErrorCode error_code = service_instance->init(update_listener);
       error_code != CustomServiceErrorCode::ERROR_OK) {
     CustomService::getInstance(CustomService::GetInstanceCmd::CLEAR_INSTANCE);
     return error_code; // Failed to initialize service, so clean up instance and return nullptr to indicate failure.

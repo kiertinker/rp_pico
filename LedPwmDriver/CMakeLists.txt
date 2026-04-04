@@ -57,6 +57,7 @@ pico_btstack_make_gatt_header(LedPwmDriver PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ga
 # Add the standard library to the build
 target_link_libraries(LedPwmDriver
     hardware_flash
+    hardware_pwm
     pico_bootsel_via_double_reset
     pico_btstack_ble
     pico_btstack_cyw43
@@ -78,4 +79,3 @@ target_link_libraries(LedPwmDriver
 )
 
 pico_add_extra_outputs(LedPwmDriver)
-

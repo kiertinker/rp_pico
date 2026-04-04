@@ -33,6 +33,7 @@ static_assert(static_cast<unsigned char>(MODE_SELECTION_VALUES::MODE_PROGRAM_4) 
 class CharacteristicUpdateListener {
  public:
   virtual void operator()(CustomServiceCharacteristicIndex index, const unsigned char* value, size_t value_size) = 0;
+  virtual std::array<std::pair<unsigned char*, size_t>, 6> getCharacteristicValuePtrs() = 0;
 };
 
 enum class CustomServiceErrorCode : int {
@@ -48,6 +49,4 @@ class CustomServiceInterface {
   virtual ~CustomServiceInterface() = default;
 };
 
-std::variant<CustomServiceInterface*, CustomServiceErrorCode> customServiceServerInit(
-    std::array<std::pair<unsigned char*, size_t>, 6> characteristic_value_ptrs, CharacteristicUpdateListener* update_listener);
-
+std::variant<CustomServiceInterface*, CustomServiceErrorCode> customServiceServerInit(CharacteristicUpdateListener* update_listener);

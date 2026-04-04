@@ -3,9 +3,11 @@
 #include "hardware/flash.h"
 #include "pico/flash.h"
 #include "pico/mutex.h"
+#include "pico/stdlib.h"
 #include "pico/time.h"
 
 #include <array>
+#include <cstdio>
 
 extern char __flash_binary_end;
 
@@ -24,10 +26,11 @@ constexpr size_t PAGE_SIZE_ALLOC_CONFIG = 1024;
 constexpr uint64_t FLASH_WRITE_DELAY_US = 1000000 * 10;  // 10 seconds
 
 unsigned char* configFlashAddress() {
-    // Calculate the start address of the PWM config in flash
-    const uint32_t flash_start = (uint32_t)&__flash_binary_end;
-    const uint32_t pwm_config_address = (flash_start + FLASH_SECTOR_SIZE) & ~(FLASH_SECTOR_SIZE - 1);
-    return reinterpret_cast<unsigned char*>(pwm_config_address);
+  printf("TEST!\n");
+  // Calculate the start address of the PWM config in flash
+  const uint32_t flash_start = (uint32_t)&__flash_binary_end;
+  const uint32_t pwm_config_address = (flash_start + FLASH_SECTOR_SIZE) & ~(FLASH_SECTOR_SIZE - 1);
+  return reinterpret_cast<unsigned char*>(pwm_config_address);
 }
 
 // Simple FNV-1a hash function for data integrity check.
@@ -38,14 +41,6 @@ unsigned long long make_hash(const unsigned char* bytes, size_t length) {
         hash *= 1099511628211ULL; // FNV prime
     }
     return hash;
-}
-
-void call_flash_range_program(void* data) {
-  flash_range_program(reinterpret_cast<uint32_t>(configFlashAddress()), reinterpret_cast<const uint8_t*>(data), PAGE_SIZE_ALLOC_CONFIG);
-}
-
-void call_flash_range_erase([[maybe_unused]] void* __unused) {
-  flash_range_erase(reinterpret_cast<uint32_t>(configFlashAddress()), FLASH_SECTOR_SIZE);
 }
 
 class PwmConfigData : public PwmConfigDataInterface {
@@ -80,16 +75,8 @@ class PwmConfigData : public PwmConfigDataInterface {
 
   void initPwnConfigData(StateChangeListener* listener);
 
-  std::array<std::pair<unsigned char*, size_t>, 6> getCharacteristicValuePtrs() {
-    return {{
-      { &data_[HASH_SIZE], 1 },  // Mode selection
-      { &data_[HASH_SIZE + 1], 8 },  // Static settings
-      { &data_[PROGRAM_START_OFFSET + 0 * PROGRAM_SIZE], PROGRAM_SIZE },  // Program 1 settings
-      { &data_[PROGRAM_START_OFFSET + 1 * PROGRAM_SIZE], PROGRAM_SIZE },  // Program 2 settings
-      { &data_[PROGRAM_START_OFFSET + 2 * PROGRAM_SIZE], PROGRAM_SIZE },  // Program 3 settings
-      { &data_[PROGRAM_START_OFFSET + 3 * PROGRAM_SIZE], PROGRAM_SIZE }   // Program 4 settings
-    }};
-  }
+  std::array<std::pair<unsigned char*, size_t>, 6> getCharacteristicValuePtrs() override;
+
   // Delete the copy & assignment constructors
   PwmConfigData(const PwmConfigData&) = delete;
   PwmConfigData& operator=(const PwmConfigData&) = delete;
@@ -98,14 +85,15 @@ class PwmConfigData : public PwmConfigDataInterface {
 PwmConfigData::PwmConfigData() {
   // Read the PWM config data from flash into the data_ array
   std::copy(configFlashAddress(), configFlashAddress() + PWM_CONFIG_SIZE, data_);
+  return;  // TEMP return for testing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   if (make_hash(data_ + HASH_SIZE, PWM_CONFIG_SIZE - HASH_SIZE) != hash_bits_) {
     // Hash mismatch - initialize to defaults (zero data) and hash the bits.
     std::fill(data_, data_ + PWM_CONFIG_SIZE, 0);
     hash_bits_ = make_hash(data_ + HASH_SIZE, PWM_CONFIG_SIZE - HASH_SIZE);
     // Erase the flash sector, then update flash with default data (and default hash).
     // This is a best effort - if it fails, we just move on.
-    if (!flash_safe_execute(call_flash_range_erase, nullptr, 1000))
-      flash_safe_execute(call_flash_range_program, reinterpret_cast<void*>(data_), 1000);
+    DisableInterruptsGuard dig;
+    updateFlash();
   }
 }
 
@@ -222,10 +210,21 @@ void PwmConfigData::operator()(CustomServiceCharacteristicIndex index, const uns
   if (set_alarm) setAlarm();
 }
 
+std::array<std::pair<unsigned char*, size_t>, 6> PwmConfigData::getCharacteristicValuePtrs() {
+  return {{
+    { &data_[HASH_SIZE], 1 },  // Mode selection
+    { &data_[HASH_SIZE + 1], 8 },  // Static settings
+    { &data_[PROGRAM_START_OFFSET + 0 * PROGRAM_SIZE], PROGRAM_SIZE },  // Program 1 settings
+    { &data_[PROGRAM_START_OFFSET + 1 * PROGRAM_SIZE], PROGRAM_SIZE },  // Program 2 settings
+    { &data_[PROGRAM_START_OFFSET + 2 * PROGRAM_SIZE], PROGRAM_SIZE },  // Program 3 settings
+    { &data_[PROGRAM_START_OFFSET + 3 * PROGRAM_SIZE], PROGRAM_SIZE }   // Program 4 settings
+  }};
+}
+
 PwmConfigData* PwmConfigData::getInstance(GetInstanceCmd cmd) {
   static PwmConfigData* instance = nullptr;
   if (cmd == GetInstanceCmd::CREATE_INSTANCE && instance == nullptr) {
-    instance = new PwmConfigData(nullptr);
+    instance = new PwmConfigData();
   } else if (cmd == GetInstanceCmd::CLEAR_INSTANCE && instance != nullptr) {
     delete instance;
     instance = nullptr;
@@ -234,11 +233,14 @@ PwmConfigData* PwmConfigData::getInstance(GetInstanceCmd cmd) {
 }
 
 void PwmConfigData::initPwnConfigData(StateChangeListener* listener) {
-  // We can ignore the listener for now since we're not using it, but we could extend PwmConfigData to call it on updates if desired.
+  if (listener == nullptr) return; // We require a listener to be provided for this function to do anything, so if it's null, we just return early.
   state_change_listener_ = listener;
+  return;  // TEMP return for testing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  std::variant<std::monostate, Program::ProgramEntry, Program> new_state;
+
   switch (static_cast<MODE_SELECTION_VALUES>(static_settings_.duration)) {
     case MODE_SELECTION_VALUES::MODE_STATIC_COLOR:
-      (*listener)(static_settings_);
+      new_state.emplace<Program::ProgramEntry>(static_settings_.getBaseAddr(), 0);
       break;
 
     case MODE_SELECTION_VALUES::MODE_PROGRAM_1:
@@ -246,23 +248,25 @@ void PwmConfigData::initPwnConfigData(StateChangeListener* listener) {
     case MODE_SELECTION_VALUES::MODE_PROGRAM_3:
     case MODE_SELECTION_VALUES::MODE_PROGRAM_4:
       // Programs start at index PROGRAM_1_SETTINGS, so we can calculate the program index by subtracting PROGRAM_1_SETTINGS from the mode value.
-      (*listener)(programs_[static_settings_.duration - static_cast<unsigned char>(CustomServiceCharacteristicIndex::PROGRAM_1_SETTINGS)]);
+      new_state.emplace<Program>(const_cast<unsigned char*>(programs_[static_settings_.duration - static_cast<unsigned char>(CustomServiceCharacteristicIndex::PROGRAM_1_SETTINGS)].getBaseAddr()), 0);
       break;
 
     case MODE_SELECTION_VALUES::MODE_OFF:
     default:
-      (*listener)(std::monostate{});
+      new_state.emplace<std::monostate>();
   }
+  (*state_change_listener_)(new_state);
 }
 
 }  // anonymous namespace
 
-PwmConfigDataInterface* pwmConfigDataInterfaceInit(StateChangeListener* listener)
-{
+PwmConfigDataInterface* pwmConfigDataInterfaceInit(StateChangeListener* listener) {
+  printf("Initializing PWM Config Data Interface...\n");
   // We can ignore the listener for now since we're not using it, but we could extend PwmConfigData to call it on updates if desired.
   (void)listener;
   PwmConfigData* instance = PwmConfigData::getInstance(PwmConfigData::GetInstanceCmd::CREATE_INSTANCE);
   if (instance == nullptr) return nullptr; // Failed to create instance, likely because one already exists.
   instance->initPwnConfigData(listener);
+  printf("PWM Config Data Interface initialized successfully.\n");
   return instance;
 }

@@ -17,7 +17,27 @@ namespace {
 
 std::function<void()> globalLambda;
 
-class LedPwmDriver : public pwmDriverInterface {
+constexpr uint PWM_FREQUENCY = 1000; // 1kHz
+struct PwmSetting {
+  std::variant<std::monostate, Program::ProgramEntry, Program> setting_;
+  std::array<unsigned char, PROGRAM_SIZE> buffer_;
+  PwmSetting() : setting_(std::monostate{}) {}
+  void update(const std::variant<std::monostate, Program::ProgramEntry, Program>& setting) {
+    if (std::holds_alternative<std::monostate>(setting)) {
+      setting_ = std::monostate{};
+    } else if (std::holds_alternative<Program::ProgramEntry>(setting)) {
+      // Copy static color data to our internal buffer and construct a ProgramEntry for use in updating PWM levels.
+      std::get<Program::ProgramEntry>(setting).copyTo(buffer_.data());
+      setting_.emplace<Program::ProgramEntry>(buffer_.data(), 0);
+    } else if (std::holds_alternative<Program>(setting)) {
+      // Copy program data to our internal buffer and construct a Program for use in running a PWM level program.
+      std::get<Program>(setting).copyTo(buffer_.data());
+      setting_.emplace<Program>(buffer_.data(), 0);
+    }
+  }
+};
+
+class LedPwmDriver : public IPwmDriver {
  private:
   void init_pwm(uint pin, uint& slice);
   Mutex pwm_mutex_; // Mutex to protect concurrent access to PWM hardware from multiple cores or interrupts.
@@ -45,32 +65,11 @@ class LedPwmDriver : public pwmDriverInterface {
 
  public:
   LedPwmDriver();
-  void operator()(std::variant<std::monostate, Program::ProgramEntry, Program>& new_state) override;
+  void operator()(const std::variant<std::monostate, Program::ProgramEntry, Program>& new_state) override;
   void waitForFlashAllowed() override;
   void notifyFlashComplete() override;
   void driveLights();
   static void globalLambdaWrapper();
-};
-
-constexpr uint PWM_FREQUENCY = 1000; // 1kHz
-class PwmSetting {
-  std::variant<std::monostate, Program::ProgramEntry, Program> setting_;
-  std::array<unsigned char, PROGRAM_SIZE> buffer_;
- public:
-  PwmSetting() : setting_(std::monostate{}) {}
-  void update(const std::variant<std::monostate, Program::ProgramEntry, Program>& setting) {
-    if (std::holds_alternative<std::monostate>(setting)) {
-      setting_ = std::monostate{};
-    } else if (std::holds_alternative<Program::ProgramEntry>(setting)) {
-      // Copy static color data to our internal buffer and construct a ProgramEntry for use in updating PWM levels.
-      std::get<Program::ProgramEntry>(setting).copyTo(buffer_.data());
-      setting_.emplace<Program::ProgramEntry>(buffer_.data(), 0);
-    } else if (std::holds_alternative<Program>(setting)) {
-      // Copy program data to our internal buffer and construct a Program for use in running a PWM level program.
-      std::get<Program>(setting).copyTo(buffer_.data());
-      setting_.emplace<Program::Program>(buffer_.data(), 0);
-    }
-  }
 };
 
 struct RGBWChannel {
@@ -81,8 +80,10 @@ struct RGBWChannel {
 RGBWChannel channels[2];
 
 void __not_in_flash_func(waitForFlashComplete)(volatile bool& waiting_for_flash_allowed, volatile bool& flash_write_complete) {
+  // Now we are in code running from SRAM, so we can safely let the flash write to commense.
   waiting_for_flash_allowed = false;
-    // If we're waiting for flash to be allowed, we skip handling the interrupt and just wait until we're notified that the flash write is complete.
+  // We now wait until the flash write is complete before allowing the PWM driver to resume normal operation,
+  // which may involve reading instructions from flash.
   while (!flash_write_complete);
 }
    
@@ -101,7 +102,7 @@ void LedPwmDriver::init_pwm(uint pin, uint& slice) {
 
 LedPwmDriver::LedPwmDriver() {}
     
-void LedPwmDriver::operator()(std::variant<std::monostate, Program::ProgramEntry, Program> new_state) {
+void LedPwmDriver::operator()(const std::variant<std::monostate, Program::ProgramEntry, Program>& new_state) {
   LockGuard lock(pwm_mutex_); // Ensure exclusive access to PWM hardware when updating settings from the state change listener, which may be called from a different thread or interrupt context.   
   if (buffer1_active_) buffer1_.update(new_state);
   else buffer2_.update(new_state);
@@ -120,7 +121,8 @@ void LedPwmDriver::notifyFlashComplete()    {
 bool LedPwmDriver::blockForInterrupt() {
   if (waiting_for_flash_allowed_) {
     // If we're waiting for flash to be allowed, we skip blocking for interrupts and just wait until we're notified that the flash write is complete.
-    waitForFlashAllowed(waiting_for_flash_allowed_, flash_write_complete_);
+    flash_write_complete_ = false; // Reset the flash write complete flag before we start waiting for the flash write to complete.
+    waitForFlashComplete(waiting_for_flash_allowed_, flash_write_complete_);
   }
   if (new_program_pending_) {
     LockGuard lock(pwm_mutex_); // Ensure exclusive access to PWM settings objects.
@@ -129,29 +131,21 @@ bool LedPwmDriver::blockForInterrupt() {
     // If we have a new program pending, we want to break out of the wait loop immediately to update the PWM output based on the new settings.
     return true;
   }
+  return false; // Indicate that there was no new program pending and we can proceed with normal operation.
 }
 
 
 void LedPwmDriver::driveLights() {
-    LockGuard lock(pwm_mutex_); // Ensure exclusive access to PWM hardware when driving lights, which may be called from a different thread or interrupt context.   
-    if (waiting_for_flash_allowed_) {
-        // If we're waiting for flash to be allowed, we skip driving the lights and just wait until we're notified that the flash write is complete.
-        if (flash_write_complete_) {
-        waiting_for_flash_allowed_ = false;
-        flash_write_complete_ = false;
-        }
-        return;
-    }
-    
-    
+  printf("Starting LED PWM Driver main loop...\n");
+  while (true) {
     const auto& active_setting = buffer1_active_ ? buffer1_.setting_ : buffer2_.setting_;
-    if (std::holds_alternative<std::monostate>(active_setting)) {
-        monostateDriveLights();
-    } else if (std::holds_alternative<Program::ProgramEntry>(active_setting)) {
-        staticColorDriveLights(std::get<Program::ProgramEntry>(active_setting));
-    } else if (std::holds_alternative<Program>(active_setting)) {
-        programDriveLights(std::get<Program>(active_setting));
-    }
+    if (std::holds_alternative<Program::ProgramEntry>(active_setting))
+      staticColorDriveLights(std::get<Program::ProgramEntry>(active_setting));
+    else if (std::holds_alternative<Program>(active_setting))
+      programDriveLights(std::get<Program>(active_setting));
+    else
+      monostateDriveLights();
+  }
 }
 
 void LedPwmDriver::monostateDriveLights() {
@@ -195,6 +189,7 @@ void LedPwmDriver::globalLambdaWrapper() {
 }
 
 IPwmDriver* ledPwmDriverInit() {
+  printf("Initializing LED PWM Driver...\n");
   LedPwmDriver* instance = new LedPwmDriver();
   // Initialize the PWM hardware and start the PWM output based on the initial settings.
   // We do this here in the init function to ensure that we set up the PWM hardware before we start receiving updates via the state change listener.
