@@ -17,7 +17,8 @@ namespace {
 
 std::function<void()> globalLambda;
 
-constexpr uint PWM_FREQUENCY = 1000; // 1kHz
+constexpr uint PWM_FREQUENCY = 2000; // 2kHz
+constexpr int64_t CYCLE_PERIOD = 20000000; // 2uHz
 struct PwmSetting {
   std::variant<std::monostate, Program::ProgramEntry, Program> setting_;
   std::array<unsigned char, PROGRAM_SIZE> buffer_;
@@ -37,13 +38,86 @@ struct PwmSetting {
   }
 };
 
+struct PwmPinConfig {
+  uint gpio_pin;
+  uint slice;
+};
+
+struct PinMagnitude {
+  void setMagnitude(unsigned int pin, unsigned short magnitude) {
+    pin_ = pin;
+    magnitude_ = magnitude;
+  }
+  unsigned int pin_;
+  unsigned short magnitude_;
+};
+
+template <typename T> void setPwmLevels(const T& t, size_t c) {
+  for (auto i = 0; i < c; ++i) pwm_set_gpio_level(t[i].pin_, t[i].magnitude_ * t[i].magnitude_);
+}
+
+constexpr int PIN_COUNT = 8;
+enum PIN_INDICES {
+  L_RED = 0,
+  L_GREEN = 1,
+  L_BLUE = 2,
+  L_WHITE = 3,
+  R_RED = 4,
+  R_GREEN = 5,
+  R_BLUE = 6,
+  R_WHITE = 7
+};
+
+std::array<PwmPinConfig, 8> PIN_CONFIGS{{
+  { .gpio_pin = 16, .slice = 0 }, // 0A Left Red
+  { .gpio_pin = 18, .slice = 0 }, // 1A Left Green
+  { .gpio_pin = 20, .slice = 0 }, // 2A Left Blue
+  { .gpio_pin = 22, .slice = 0 }, // 3A Left White
+  { .gpio_pin = 14, .slice = 0 }, // 7A Right Red
+  { .gpio_pin = 12, .slice = 0 }, // 6A Right Green
+  { .gpio_pin = 10, .slice = 0 }, // 5A Right Blue
+  { .gpio_pin =  8, .slice = 0 }  // 4A Right White
+}};
+
+void setProgramEntryPwmMagnitudes(const Program::ProgramEntry& entry, std::array<PinMagnitude, 8>& magnitudes) {
+  magnitudes[0].setMagnitude(PIN_CONFIGS[PIN_INDICES::L_RED].gpio_pin, entry.left_channel.red.get_magnitude());
+  magnitudes[1].setMagnitude(PIN_CONFIGS[PIN_INDICES::L_GREEN].gpio_pin, entry.left_channel.green.get_magnitude());
+  magnitudes[2].setMagnitude(PIN_CONFIGS[PIN_INDICES::L_BLUE].gpio_pin, entry.left_channel.blue.get_magnitude());
+  magnitudes[3].setMagnitude(PIN_CONFIGS[PIN_INDICES::L_WHITE].gpio_pin, entry.left_channel.white.get_magnitude());
+  magnitudes[4].setMagnitude(PIN_CONFIGS[PIN_INDICES::R_RED].gpio_pin, entry.right_channel.red.get_magnitude());
+  magnitudes[5].setMagnitude(PIN_CONFIGS[PIN_INDICES::R_GREEN].gpio_pin, entry.right_channel.green.get_magnitude());
+  magnitudes[6].setMagnitude(PIN_CONFIGS[PIN_INDICES::R_BLUE].gpio_pin, entry.right_channel.blue.get_magnitude());
+  magnitudes[7].setMagnitude(PIN_CONFIGS[PIN_INDICES::R_WHITE].gpio_pin, entry.right_channel.white.get_magnitude());
+}
+
+int getFadeMagnitudes(
+    std::array<PinMagnitude, 8>& next_pin_magnitudes,
+    const Program::ProgramEntry* current_entry, const Program::ProgramEntry* previous_entry,
+    int current_cycle, int cycles) {
+  int current_index = 0;
+  for (int i = 0; i < PIN_COUNT; ++i) {
+    if (current_entry->color_array[i]->is_fade()) {
+      unsigned int ce_mag = static_cast<unsigned int>(current_entry->color_array[i]->get_magnitude());
+      unsigned int pe_mag = static_cast<unsigned int>(previous_entry->color_array[i]->get_magnitude());
+      next_pin_magnitudes[current_index++].setMagnitude(
+          PIN_CONFIGS[static_cast<PIN_INDICES>(i)].gpio_pin,
+          (pe_mag <= ce_mag) ? (pe_mag + (ce_mag - pe_mag) * current_cycle / cycles) : (pe_mag - (pe_mag - ce_mag) * current_cycle / cycles));
+    }
+  }
+  return current_index;
+}
+
+int getAbsoluteMagnitudes(std::array<PinMagnitude, 8>& next_pin_magnitudes, const Program::ProgramEntry* current_entry, int current_index) {
+  for (int i = 0; i < PIN_COUNT; ++i)
+    if (!current_entry->color_array[i]->is_fade())
+      next_pin_magnitudes[current_index++].setMagnitude(PIN_CONFIGS[i].gpio_pin, current_entry->color_array[i]->get_magnitude());
+  return current_index;
+}
+
 class LedPwmDriver : public IPwmDriver {
  private:
   void init_pwm(uint pin, uint& slice);
   Mutex pwm_mutex_; // Mutex to protect concurrent access to PWM hardware from multiple cores or interrupts.
-  // Flag to track which buffer is currently active for PWM output, used for double buffering of program data
-  // to ensure consistent updates to the PWM hardware without glitches.   
-  bool buffer1_active_ = true;
   // Flag to indicate that a new program has been loaded and is pending to be applied to the PWM hardware on
   // the next cycle, used in conjunction with double buffering to ensure smooth transitions between programs without glitches.
   // This flag is set to true whenever a new program is loaded via the state change listener and is reset to false
@@ -57,6 +131,9 @@ class LedPwmDriver : public IPwmDriver {
   volatile bool flash_write_complete_ = false;
   // Double buffers for PWM settings to allow glitch-free updates to the PWM hardware when changing programs or static settings.
   PwmSetting buffer1_, buffer2_;
+  // Active buffer for PWM output, used for double buffering of program data
+  // to ensure consistent updates to the PWM hardware without glitches.   
+  PwmSetting* active_buffer_ = &buffer1_;
 
   void monostateDriveLights();
   void staticColorDriveLights(const Program::ProgramEntry& static_settings);
@@ -72,12 +149,6 @@ class LedPwmDriver : public IPwmDriver {
   static void globalLambdaWrapper();
 };
 
-struct RGBWChannel {
-  uint pin_r, pin_g, pin_b, pin_w;
-  uint slice_r, slice_g, slice_b, slice_w;
-};
-    
-RGBWChannel channels[2];
 
 void __not_in_flash_func(waitForFlashComplete)(volatile bool& waiting_for_flash_allowed, volatile bool& flash_write_complete) {
   // Now we are in code running from SRAM, so we can safely let the flash write to commense.
@@ -93,23 +164,35 @@ void LedPwmDriver::init_pwm(uint pin, uint& slice) {
   gpio_set_function(pin, GPIO_FUNC_PWM);
   slice = pwm_gpio_to_slice_num(pin);
   
-  uint clock_div = clock_get_hz(clk_sys) / (PWM_FREQUENCY * 4096);
+  // The PWM frequency is is ulltimately constrained by the switching speed of our XY-MOS MOSFETs,
+  // which are rated for up to 100kHz switching speeds, but are ultimately determined by the capacitance of the gate and the voltage applied.
+  // The pi pico doesn't apply a very high voltage, so we have to assume in our case it is much lower than 100kHz.  So we will set the frequency as
+  // low as we we can while still ensuring that we have enough resolution for our PWM levels to allow for smooth dimming and color transitions,
+  // especially since we're using a non-linear brightness curve that squares the input value to get the output brightness.
+  // With a base frequency of 2kHz and a wrap value of 8191, we can achieve a good balance of frequency and resolution for our application.
+  // 8192 is the number of steps we have with a wrap value of 8191 (0-8191 inclusive gives us 8192 steps)
+  // and a non-linear brightness curve that squares the input value, effectively giving us 8192 steps of brightness control.
+  uint clock_div = clock_get_hz(clk_sys) / (PWM_FREQUENCY * 8192);
   pwm_config config = pwm_get_default_config();
   pwm_config_set_clkdiv(&config, clock_div);
-  pwm_config_set_wrap(&config, 4095);
+  pwm_config_set_wrap(&config, 8191);
   pwm_init(slice, &config, true);
 }
 
-LedPwmDriver::LedPwmDriver() {}
+LedPwmDriver::LedPwmDriver() {
+  for (const PwmPinConfig& pin_config : PIN_CONFIGS)
+    init_pwm(pin_config.gpio_pin, const_cast<uint&>(pin_config.slice));
+}
     
 void LedPwmDriver::operator()(const std::variant<std::monostate, Program::ProgramEntry, Program>& new_state) {
   LockGuard lock(pwm_mutex_); // Ensure exclusive access to PWM hardware when updating settings from the state change listener, which may be called from a different thread or interrupt context.   
-  if (buffer1_active_) buffer1_.update(new_state);
-  else buffer2_.update(new_state);
+  if (active_buffer_ == &buffer1_) buffer2_.update(new_state);
+  else buffer1_.update(new_state);
   new_program_pending_ = true; // Set the flag to indicate that we have a new program pending to be applied to the PWM hardware.
 }
 
 void LedPwmDriver::waitForFlashAllowed() {
+  printf("PWM driver notified to wait for flash to be allowed.  Entering wait state...\n");
   waiting_for_flash_allowed_ = true;
   while (waiting_for_flash_allowed_);
 }
@@ -120,14 +203,18 @@ void LedPwmDriver::notifyFlashComplete()    {
 
 bool LedPwmDriver::blockForInterrupt() {
   if (waiting_for_flash_allowed_) {
+    printf("Waiting to flash.  Entering SRAM loop...\n");
     // If we're waiting for flash to be allowed, we skip blocking for interrupts and just wait until we're notified that the flash write is complete.
     flash_write_complete_ = false; // Reset the flash write complete flag before we start waiting for the flash write to complete.
     waitForFlashComplete(waiting_for_flash_allowed_, flash_write_complete_);
+    printf("Flash write complete.  Resuming normal operation...\n");
   }
   if (new_program_pending_) {
+    printf("New program pending.  Updating PWM settings...\n");
     LockGuard lock(pwm_mutex_); // Ensure exclusive access to PWM settings objects.
     new_program_pending_ = false; // Reset the flag now that we're handling the new program pending state.
-    buffer1_active_ = !buffer1_active_; // Switch active buffer to the one that was just updated with new settings.
+    // Switch active buffer to the one that was just updated with new settings.
+    active_buffer_ = (active_buffer_ == &buffer1_) ? &buffer2_ : &buffer1_;
     // If we have a new program pending, we want to break out of the wait loop immediately to update the PWM output based on the new settings.
     return true;
   }
@@ -138,51 +225,84 @@ bool LedPwmDriver::blockForInterrupt() {
 void LedPwmDriver::driveLights() {
   printf("Starting LED PWM Driver main loop...\n");
   while (true) {
-    const auto& active_setting = buffer1_active_ ? buffer1_.setting_ : buffer2_.setting_;
-    if (std::holds_alternative<Program::ProgramEntry>(active_setting))
-      staticColorDriveLights(std::get<Program::ProgramEntry>(active_setting));
-    else if (std::holds_alternative<Program>(active_setting))
-      programDriveLights(std::get<Program>(active_setting));
+    if (std::holds_alternative<Program::ProgramEntry>(active_buffer_->setting_))
+      staticColorDriveLights(std::get<Program::ProgramEntry>(active_buffer_->setting_));
+    else if (std::holds_alternative<Program>(active_buffer_->setting_))
+      programDriveLights(std::get<Program>(active_buffer_->setting_));
     else
       monostateDriveLights();
   }
 }
 
 void LedPwmDriver::monostateDriveLights() {
+  printf("Monostate mode active.  Turning off all lights and waiting for new settings...\n");
   // Set all PWM levels to 0 to turn off all lights.
-  pwm_set_gpio_level(channels[0].pin_r, 0);
-  pwm_set_gpio_level(channels[0].pin_g, 0);
-  pwm_set_gpio_level(channels[0].pin_b, 0);
-  pwm_set_gpio_level(channels[0].pin_w, 0);
-  pwm_set_gpio_level(channels[1].pin_r, 0);
-  pwm_set_gpio_level(channels[1].pin_g, 0);
-  pwm_set_gpio_level(channels[1].pin_b, 0);
-  pwm_set_gpio_level(channels[1].pin_w, 0);
+  for (const PwmPinConfig& pin_config : PIN_CONFIGS)
+    pwm_set_gpio_level(pin_config.gpio_pin, 0);
   // In monostate (off) mode, we just want to keep the lights off and wait for an interrupt to update the state,
   // so we can just loop here with minimal CPU usage.
   while (!blockForInterrupt()) tight_loop_contents();
 }
 
 void LedPwmDriver::staticColorDriveLights(const Program::ProgramEntry& static_settings) {
+  printf("Static color mode active.  Setting lights to static color settings and waiting for new settings...\n");
   // Set PWM levels based on the static color settings in the provided ProgramEntry.
-  pwm_set_gpio_level(channels[0].pin_r, static_settings.left_channel.red.get_magnitude());
-  pwm_set_gpio_level(channels[0].pin_g, static_settings.left_channel.green.get_magnitude());
-  pwm_set_gpio_level(channels[0].pin_b, static_settings.left_channel.blue.get_magnitude());
-  pwm_set_gpio_level(channels[0].pin_w, static_settings.left_channel.white.get_magnitude());
-  pwm_set_gpio_level(channels[1].pin_r, static_settings.right_channel.red.get_magnitude());
-  pwm_set_gpio_level(channels[1].pin_g, static_settings.right_channel.green.get_magnitude());
-  pwm_set_gpio_level(channels[1].pin_b, static_settings.right_channel.blue.get_magnitude());
-  pwm_set_gpio_level(channels[1].pin_w, static_settings.right_channel.white.get_magnitude());
+  std::array<PinMagnitude, 8> pin_magnitudes;
+  setProgramEntryPwmMagnitudes(static_settings, pin_magnitudes);
+  setPwmLevels(pin_magnitudes, 8);
   // In static color mode, we just want to keep the lights at the set color and wait for an interrupt to update the state,
   // so we can just loop here with minimal CPU usage.
   while (!blockForInterrupt()) tight_loop_contents();
 }
 
 void LedPwmDriver::programDriveLights(const Program& program) {
-  // This function would implement the logic to run a program of PWM settings based on the provided Program object.
-  // For simplicity, this is just a placeholder and would need to be implemented to handle timing and transitions between program entries.
-}
+  printf("Program mode active.  Running program...\n");
+  // Check to see if the program has a non-zero duration for any of its entries, if not, we can just run the static color settings
+  // for the starting entry without worrying about timing or transitions since there are no durations to handle.
+  bool has_non_zero_duration = false;
+  for (const auto& entry : program.entries_) {
+    if (entry.duration != 0) {
+       has_non_zero_duration = true;
+       break;
+    }
+  }
+  if (!has_non_zero_duration) {
+    printf("Program has no entries with non-zero duration.  Running static color settings for starting entry...\n");
+    staticColorDriveLights(program.starting_entry_);
+    return;
+  }
+  // Seed the current entry to `starting_entry_` so it will be bumped tp the previous_entry in the first iteration.
+  const Program::ProgramEntry* current_entry = &program.starting_entry_;
+  const Program::ProgramEntry* previous_entry = nullptr;
 
+  size_t c_pin_magnitudes = 8;
+  std::array<PinMagnitude, 8> next_pin_magnitudes;
+  setProgramEntryPwmMagnitudes(program.starting_entry_, next_pin_magnitudes);
+  // Seed this to the last index since we do a pre-increment modulus at the start of the program entry loop
+  // to determine the current index, which will put us at zero.
+  size_t current_entry_index = 19;
+  absolute_time_t cycle_start_time = get_absolute_time();
+  while (true) {  // Program entry loop
+    previous_entry = current_entry;
+    // Cycle through program entries until we hit one with a non-zero duration.
+    do { ++current_entry_index %= 20; } while (!program.entries_[current_entry_index].duration);
+    current_entry = &program.entries_[current_entry_index];
+    unsigned int duration = current_entry->duration;
+    int cycles = duration * 5;
+    int current_cycle = 0;
+    while (current_cycle < cycles) {  // Cycle loop
+      setPwmLevels(next_pin_magnitudes, c_pin_magnitudes);
+      c_pin_magnitudes = getFadeMagnitudes(next_pin_magnitudes, current_entry, previous_entry, current_cycle + 1, cycles);
+      if (!current_cycle) c_pin_magnitudes = getAbsoluteMagnitudes(next_pin_magnitudes, current_entry, c_pin_magnitudes);
+      while (absolute_time_diff_us(cycle_start_time, get_absolute_time()) < CYCLE_PERIOD) {
+        if (blockForInterrupt())
+          return; // Break out of the program loop immediately to update the PWM settings based on the new program pending state.
+        tight_loop_contents();
+      }
+      cycle_start_time = get_absolute_time();
+    }
+  }
+}
 
 void LedPwmDriver::globalLambdaWrapper() {
   globalLambda();

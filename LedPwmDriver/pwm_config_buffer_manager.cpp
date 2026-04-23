@@ -25,12 +25,13 @@ constexpr size_t PAGE_SIZE_ALLOC_CONFIG = 1024;
 // Wait time after a config change before allowing another change to prevent excessive flash writes if multiple updates come in within a short time frame.
 constexpr uint64_t FLASH_WRITE_DELAY_US = 1000000 * 10;  // 10 seconds
 
-unsigned char* configFlashAddress() {
-  printf("TEST!\n");
-  // Calculate the start address of the PWM config in flash
-  const uint32_t flash_start = (uint32_t)&__flash_binary_end;
-  const uint32_t pwm_config_address = (flash_start + FLASH_SECTOR_SIZE) & ~(FLASH_SECTOR_SIZE - 1);
-  return reinterpret_cast<unsigned char*>(pwm_config_address);
+constexpr unsigned char* configFlashWriteAddress() {
+  uint32_t flash_target_addr = ((reinterpret_cast<uint32_t>(&__flash_binary_end) + FLASH_SECTOR_SIZE - 1) & ~(FLASH_SECTOR_SIZE - 1)) - XIP_BASE;
+  return reinterpret_cast<unsigned char*>(flash_target_addr);
+}
+
+constexpr unsigned char* configFlashReadAddress() {
+  return configFlashWriteAddress() + XIP_BASE; // Address in the XIP region corresponding to the config flash address
 }
 
 // Simple FNV-1a hash function for data integrity check.
@@ -83,22 +84,16 @@ class PwmConfigData : public PwmConfigDataInterface {
 };
 
 PwmConfigData::PwmConfigData() {
-  // Read the PWM config data from flash into the data_ array
-  std::copy(configFlashAddress(), configFlashAddress() + PWM_CONFIG_SIZE, data_);
-  return;  // TEMP return for testing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  if (make_hash(data_ + HASH_SIZE, PWM_CONFIG_SIZE - HASH_SIZE) != hash_bits_) {
-    // Hash mismatch - initialize to defaults (zero data) and hash the bits.
-    std::fill(data_, data_ + PWM_CONFIG_SIZE, 0);
-    hash_bits_ = make_hash(data_ + HASH_SIZE, PWM_CONFIG_SIZE - HASH_SIZE);
-    // Erase the flash sector, then update flash with default data (and default hash).
-    // This is a best effort - if it fails, we just move on.
-    DisableInterruptsGuard dig;
-    updateFlash();
-  }
+  printf("Getting flash write address.  flash binary end: %p\n", (void*)&__flash_binary_end);
+  printf("Calculated flash write target address: 0x%08x\n", reinterpret_cast<uint32_t>(configFlashWriteAddress()));
+  printf("Getting flash read address.  Target address: %p\n", (void*)(configFlashWriteAddress() + XIP_BASE));
 }
 
 void PwmConfigData::setAlarm()  {
-  add_alarm_in_ms(last_change_time_ + FLASH_WRITE_DELAY_US, [](alarm_id_t id, void* user_data) -> int64_t {
+  printf("Setting alarm to write PWM config to flash after delay...\n");
+  absolute_time_t now = get_absolute_time();
+  add_alarm_in_us(FLASH_WRITE_DELAY_US - absolute_time_diff_us(last_change_time_, now), [](alarm_id_t id, void* user_data) -> int64_t {
+    printf("Alarm callback triggered, checking if we can write PWM config to flash now...\n");
     reinterpret_cast<PwmConfigData*>(user_data)->handleAlarm();
     return 0;
   }, this, false);
@@ -108,19 +103,24 @@ void PwmConfigData::handleAlarm() {
   // We don't need to worry about concurrency issues with the BLE event handler since it runs at a higher priority than this alarm callback, but we do need to ensure that we don't have concurrency issues with the PWM driver interrupt handler, which can be triggered at any time and may also want to write to flash if it's waiting for a flash write to complete.  To prevent concurrency issues with the PWM driver interrupt handler, we wait until we're allowed to write to flash before actually performing the flash write, and we disable interrupts while we're writing to flash to prevent the interrupt handler from preempting us in the middle of a flash write.  We also check if we've had another config update come in since we set the alarm, and if so, we just set another alarm to push the flash write out further instead of writing to flash immediately.
   DisableInterruptsGuard dig;
   absolute_time_t now = get_absolute_time();
+  printf("Alarm triggered for flash write, checking if config data has been updated since alarm was set...\n");
   if (absolute_time_diff_us(last_change_time_, now) >= FLASH_WRITE_DELAY_US) {
+    printf("Updating flash with new PWM config data...\n");
     last_change_time_ = 0;
     updateFlash();
   } else {
     // If the config was updated again during the wait time, set another alarm to check again after the delay.
+    printf("Config data was updated again since alarm was set, setting another alarm to delay flash write...\n");
     setAlarm();
   }
 }
 
 void PwmConfigData::updateFlash() {
+  printf("Updating flash with new PWM config data...\n");
   state_change_listener_->waitForFlashAllowed(); // Wait until we're allowed to write to flash to prevent concurrency issues with the PWM driver interrupt handler.
-  flash_range_erase(reinterpret_cast<uint32_t>(configFlashAddress()), FLASH_SECTOR_SIZE);
-  flash_range_program(reinterpret_cast<uint32_t>(configFlashAddress()), data_, PAGE_SIZE_ALLOC_CONFIG);
+  flash_range_erase(reinterpret_cast<uint32_t>(configFlashWriteAddress()), FLASH_SECTOR_SIZE);
+  flash_range_program(reinterpret_cast<uint32_t>(configFlashWriteAddress()), data_, PAGE_SIZE_ALLOC_CONFIG);
+  printf("Flash write complete.\n");
   state_change_listener_->notifyFlashComplete(); // Notify the PWM driver that the flash write is complete so it can resume normal operation if it was waiting for this.
 }
 
@@ -135,11 +135,14 @@ void PwmConfigData::operator()(CustomServiceCharacteristicIndex index, const uns
   // If last_change_time_ is non-zero, that means we have an alarm scheduled to write to flash,
   // so we can just update the config data and let the existing alarm reset itself to push the delay out further before writing to flash.
   bool set_alarm = 0 == last_change_time_;
+  printf("Received update for characteristic index %d, value size %zu.  Set alarm: %s\n", static_cast<int>(index), value_size, set_alarm ? "true" : "false");
   switch (index) {
     case CustomServiceCharacteristicIndex::MODE_SELECTION:
+      printf("Updating mode selection with new value: %d\n", value[0]);
       // Check for immediate exit conditions
       if (value_size != 1 || value[0] > static_cast<unsigned char>(MODE_SELECTION_VALUES::MODE_PROGRAM_4)) return;  // bogus data so just bail out here.
       if (value[0] == static_settings_.duration) return; // No change in mode, so no need to update or notify.
+      printf("Mode selection changed from %d to %d\n", static_settings_.duration, value[0]);
 
       static_settings_.duration = value[0];
       if (state_change_listener_ == nullptr)
@@ -235,6 +238,19 @@ PwmConfigData* PwmConfigData::getInstance(GetInstanceCmd cmd) {
 void PwmConfigData::initPwnConfigData(StateChangeListener* listener) {
   if (listener == nullptr) return; // We require a listener to be provided for this function to do anything, so if it's null, we just return early.
   state_change_listener_ = listener;
+  printf("Initializing PWM Config Data...\n");
+  // Read the PWM config data from flash into the data_ array
+  std::copy(configFlashReadAddress(), configFlashReadAddress() + PWM_CONFIG_SIZE, data_);
+  if (make_hash(data_ + HASH_SIZE, PWM_CONFIG_SIZE - HASH_SIZE) != hash_bits_) {
+    // Hash mismatch - initialize to defaults (zero data) and hash the bits.
+    printf("PWM config hash mismatch - initializing to defaults.\n");
+    std::fill(data_, data_ + PWM_CONFIG_SIZE, 0);
+    hash_bits_ = make_hash(data_ + HASH_SIZE, PWM_CONFIG_SIZE - HASH_SIZE);
+    // Erase the flash sector, then update flash with default data (and default hash).
+    // This is a best effort - if it fails, we just move on.
+    DisableInterruptsGuard dig;
+    updateFlash();
+  }
   return;  // TEMP return for testing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   std::variant<std::monostate, Program::ProgramEntry, Program> new_state;
 

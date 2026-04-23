@@ -66,16 +66,19 @@ struct Program {
   struct ProgramEntry {
     struct Channel {
       struct Color {
-          Color(unsigned char& byte_ref) : value(byte_ref) {}
-          unsigned char& value;
-          bool is_fade() const { return (value & 0x80) != 0; }
-          unsigned char get_magnitude() const { return value & 0x7F; }
+        Color(unsigned char& byte_ref) : value(byte_ref) {}
+        unsigned char& value;
+        bool is_fade() const { return (value & 0x80) != 0; }
+        // For magnitude, we filter out fade bit and normalize to 0-255.
+        unsigned short get_magnitude() const { return static_cast<unsigned short>((value & 0x7F) << 1); }
       };
+
       Channel(unsigned char* base) : red(base[0]), green(base[1]), blue(base[2]), white(base[3]) {}
       Channel(const Channel& other) = delete;  // Disable copy constructor to prevent accidentally copying the channel data instead of referencing it.
       void operator=(const Channel& other) = delete;  // Disable copy assignment to prevent accidentally copying the channel data instead of referencing it.
       Color red, green, blue, white;
     };
+
     ProgramEntry(unsigned char* base, size_t index)
         : duration(base[index * PROGRAM_ENTRY_SIZE]),
         left_channel(base + index * PROGRAM_ENTRY_SIZE + 1),
@@ -87,6 +90,10 @@ struct Program {
     void operator=(const Program& other) = delete; // We delete the assignment operator to prevent accidentally copying the entry data instead of referencing it. If we want to copy the data, we can use the copyTo method.
     unsigned char& duration;
     Channel left_channel, right_channel;
+    std::array<Channel::Color*, 8> color_array = {
+      &left_channel.red, &left_channel.green, &left_channel.blue, &left_channel.white,
+      &right_channel.red, &right_channel.green, &right_channel.blue, &right_channel.white
+    };
     void copyTo(unsigned char* dest) const {
       unsigned char* base_addr = getBaseAddr();
       std::copy(base_addr, base_addr + PROGRAM_ENTRY_SIZE, dest);
@@ -108,7 +115,6 @@ struct Program {
   void copyTo(unsigned char* dest) const { std::copy(base_addr_, base_addr_ + PROGRAM_SIZE, dest); }
   bool operator==(Program& other) const { return std::equal(base_addr_, base_addr_ + PROGRAM_SIZE, other.base_addr_); }
 
- private:
   unsigned char* base_addr_;
   ProgramEntry starting_entry_;
   std::array<ProgramEntry, 20> entries_;

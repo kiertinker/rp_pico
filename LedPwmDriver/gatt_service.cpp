@@ -314,15 +314,19 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
   static std::vector<uint8_t> staging_buffer(256); // Temporary staging buffer for writes
   // Enable/disable notifications
   if (attribute_handle == characteristic_handles_.client_configuration_handle){
+    printf("Attribute handle matches client configuration handle for %s.\nClient configuration write: handle=0x%04x, value=0x%04x\n", characteristic_values_.user_description.data(), attribute_handle, little_endian_read_16(buffer, 0));
 	  characteristic_values_.client_configuration = little_endian_read_16(buffer, 0);
     return 0U;
   }
 
   // Write characteristic value
   if (attribute_handle == characteristic_handles_.value_handle) {
+    printf("Attribute handle matches value handle for %s.\nValue write: handle=0x%04x, offset=%d, buffer size=%d\n", characteristic_values_.user_description.data(), attribute_handle, offset, buffer_size);
     switch (transaction_mode) {
       case ATT_TRANSACTION_MODE_NONE:
+        printf("Transaction mode: None\n");
         if (offset + buffer_size != characteristic_values_.value.size()) {
+          printf("Write out of bounds: offset %d + buffer size %d exceeds characteristic value size %d\n", offset, buffer_size, characteristic_values_.value.size());
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH; // Indicate error
         }
@@ -332,19 +336,24 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
             // Example: Validate that mode selection is within expected range (0-4)
             (buffer[0] > 4))
           return 0U;  // Invalid mode, but fail silently.
+        printf("Write within bounds, updating characteristic value.\n");
         memcpy(characteristic_values_.value.data() + offset, buffer, buffer_size);
         break;
 
       case ATT_TRANSACTION_MODE_ACTIVE:
+        printf("Transaction mode: Active\n");
         // Store data in staging buffer
         if (offset + buffer_size > staging_buffer.size()) {
+          printf("Staging buffer overflow: offset %d + buffer size %d exceeds staging buffer size %d\n", offset, buffer_size, staging_buffer.size());
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_OFFSET; // Indicate error
         }
         return 0U;
 
       case ATT_TRANSACTION_MODE_VALIDATE:
+        printf("Transaction mode: Validate\n");
         if (offset + buffer_size != characteristic_values_.value.size()) {
+          printf("Validation failed: offset %d + buffer size %d does not match characteristic value size %d\n", offset, buffer_size, characteristic_values_.value.size());
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH; // Indicate error
         }
@@ -352,13 +361,16 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
         return 0U;
 
       case ATT_TRANSACTION_MODE_EXECUTE:
+        printf("Transaction mode: Execute\n");
         memcpy(characteristic_values_.value.data(), staging_buffer.data(), characteristic_values_.value.size());
         break;
 
       case ATT_TRANSACTION_MODE_CANCEL:
+        printf("Transaction mode: Cancel\n");
         return 0U;
     
       default:
+        printf("Unknown transaction mode: %d\n", transaction_mode);
         return 0U; // Invalid transaction mode, indicate error.
     }
     return characteristic_values_.value.data(); // Indicate success and provide pointer to new value. 
@@ -367,12 +379,19 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
 }
 
 std::optional<uint16_t> CustomServiceCharacteristic::customServiceCharacteristicRead(hci_con_handle_t con_handle, uint16_t attribute_handle, uint16_t offset, unsigned char* buffer, uint16_t buffer_size) {
-  if (attribute_handle == characteristic_handles_.value_handle)
+  if (attribute_handle == characteristic_handles_.value_handle) {
+    printf("Read request for %s value handle (0x%04x), offset %d, buffer size %d\n", characteristic_values_.user_description.data(), attribute_handle, offset, buffer_size);
     return att_read_callback_handle_blob(characteristic_values_.value.data(), characteristic_values_.value.size(), offset, buffer, buffer_size);
-  if (attribute_handle == characteristic_handles_.client_configuration_handle)
+  }
+  if (attribute_handle == characteristic_handles_.client_configuration_handle) {
+    printf("Read request for %s client configuration handle (0x%04x), offset %d, buffer size %d\n", characteristic_values_.user_description.data(), attribute_handle, offset, buffer_size);
     return att_read_callback_handle_little_endian_16(characteristic_values_.client_configuration, offset, buffer, buffer_size);
-  if (attribute_handle == characteristic_handles_.user_description_handle)
+  }
+  if (attribute_handle == characteristic_handles_.user_description_handle) {
+    printf("Read request for %s user description handle (0x%04x), offset %d, buffer size %d\n", characteristic_values_.user_description.data(), attribute_handle, offset, buffer_size);
     return att_read_callback_handle_blob((unsigned char*)characteristic_values_.user_description.data(), characteristic_values_.user_description.length(), offset, buffer, buffer_size);
+  }
+  printf("Read request for unknown attribute handle (0x%04x)\n", attribute_handle);
   return std::nullopt;
 }
 
@@ -388,6 +407,21 @@ CustomService* CustomService::getInstance(GetInstanceCmd cmd) {
   }
   return instance;
 }
+void deleteTag(void *context, uint32_t tag) {
+  // No-op delete tag function for dummy TLV implementation
+}
+int setTag(void *context, uint32_t tag, const uint8_t *value, uint32_t value_len) {
+  // No-op set tag function for dummy TLV implementation
+  return 0; // Indicate success
+}
+int getTag(void * context, uint32_t tag, uint8_t * buffer, uint32_t buffer_size) {
+  // No-op get tag function for dummy TLV implementation
+  return 0; // Indicate success but no data
+}
+int btstack_tlv_none_set_tag(const btstack_tlv_t *tlv, void *context, uint32_t tag, const uint8_t *value, uint32_t value_len) {
+  // No-op set tag function for dummy TLV implementation
+  return 0; // Indicate success
+}
 
 CustomServiceErrorCode CustomService::init(CharacteristicUpdateListener* update_listener) {
   static btstack_packet_callback_registration_t att_event_callback_registration;
@@ -400,6 +434,11 @@ CustomServiceErrorCode CustomService::init(CharacteristicUpdateListener* update_
   // btstack_tlv_set_instance(tlv_impl, NULL); // Second param is context, not needed here
   // printf("Dummy TLV instance set for BTstack.\n");
 
+  printf("Disabling non-volatile memory storage for BTstack...\n");
+  // Register a NULL/no-op TLV backend so LE device DB also stays in RAM
+  // Do NOT call btstack_tlv_flash_bank_init() or pico_flash_bank_instance()
+  static btstack_tlv_t tlv_impl = {.get_tag = &getTag, .store_tag = &setTag, .delete_tag = &deleteTag};
+  btstack_tlv_set_instance(&tlv_impl, NULL);
   printf("Initializing Bluetooth hardware...\n");
   // Initialise the BT/Wi-Fi chip
   if (int fail_code = cyw43_arch_init(); fail_code != 0) {
@@ -407,9 +446,6 @@ CustomServiceErrorCode CustomService::init(CharacteristicUpdateListener* update_
     return CustomServiceErrorCode::CYW43_ARCH_INIT_FAILED;
   }
   printf("Bluetooth hardware initialized successfully.\n");
-
-  l2cap_init();
-  printf("L2CAP initialized successfully.\n");
 
   const std::array<std::pair<unsigned char*, size_t>, 6>& characteristic_value_ptrs = update_listener->getCharacteristicValuePtrs();
   constexpr std::array<CustomServiceCharacteristic::CharacteristicHandles, 6> characteristic_handles_array = {{
@@ -451,13 +487,17 @@ CustomServiceErrorCode CustomService::init(CharacteristicUpdateListener* update_
   // hci_event_callback_registration.callback = &packet_handler;
   // hci_add_event_handler(&hci_event_callback_registration);
 
-  att_event_callback_registration.callback = &hci_packet_handler;
-  att_server_register_packet_handler(&hci_packet_handler);  //&att_event_callback_registration);
   /*
    * BLE-only security manager: just-works, no bonding, no MITM.
    * sm_set_io_capabilities / sm_set_authentication_requirements
    * govern BLE pairing exclusively (classic BT is disabled).
    */
+
+  l2cap_init();
+  printf("L2CAP initialized successfully.\n");
+
+
+  sm_init();
   sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
   sm_set_authentication_requirements(0);   /* No bonding, no MITM */
   // /* Disable classic BT so only BLE is active. */
@@ -473,18 +513,20 @@ CustomServiceErrorCode CustomService::init(CharacteristicUpdateListener* update_
 
   /* Load advertisement data and set parameters. */
   gap_advertisements_set_data(adv_data.size(), (uint8_t*) adv_data.data());
+  bd_addr_t null_addr;
+  memset(null_addr, 0, 6);
   gap_advertisements_set_params(
     0x00A0,   /* min interval: 100 ms  (units: 0.625 ms) */
     0x00A0,   /* max interval: 100 ms                    */
     0 /*ADV_IND*/,  /* connectable undirected                  */
     0,        /* own address type: public                */
-    NULL,  /* no whitelist                            */
+    null_addr,  /* no whitelist                            */
     0x07,     /* all channels (37, 38, 39)               */
     0         /* no filter policy                        */
   );
   
   // register for ATT event
-  att_server_register_packet_handler(hci_packet_handler);
+  att_server_register_packet_handler(&hci_packet_handler);
   
   // turn on bluetooth!
   hci_power_control(HCI_POWER_ON);
