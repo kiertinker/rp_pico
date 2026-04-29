@@ -47,7 +47,7 @@
 // We don't give btstack a malloc, so use a fixed-size ATT DB.
 #define MAX_ATT_DB_SIZE 512
 
-#define DISABLE_BT_FLASH
+#define DISABLE_BT_FLASH  // Added to C:\Users\kier\.pico-sdk\sdk\2.2.0\src\rp2_common\pico_cyw43_driver\btstack_cyw43.c
 
 // BTstack HAL configuration
 #define HAVE_EMBEDDED_TIME_MS

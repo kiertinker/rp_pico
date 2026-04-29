@@ -214,7 +214,6 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
     printf("[BLE] Pairing complete, status=0x%02x\n", sm_event_pairing_complete_get_status(packet));
     break;
   default:
-    printf("[BLE] Unhandled event: 0x%02x\n", event_code);
     break;
   }
 }
@@ -293,10 +292,13 @@ int CustomService::customServiceWriteCallback(
           uint8_t* new_value = std::get<uint8_t*>(result);
           // We can ignore the value and size parameters here since the listener can read the updated value directly from the characteristic's value pointer if needed.
           (*instance->update_listener_)(CustomServiceCharacteristicIndex(&characteristic - &instance->characteristics_[0]), new_value, buffer_size);
+//          printf("Notified update listener of change to characteristic index %d\n", &characteristic - &instance->characteristics_[0]);
         }
     }
+//    printf("Write callback processed for handle 0x%04x, attribute handle 0x%04x\n", con_handle, attribute_handle);
     return 0; // Indicate success for the write operation.
   }
+//  printf("Write callback called with handle: 0x%04x, attribute handle: 0x%04x, but no characteristic matched the handle.\n", con_handle, attribute_handle);
   return ATT_ERROR_INVALID_HANDLE;  // Couldn't find the handle, so returning error.
 }
 
@@ -314,17 +316,17 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
   static std::vector<uint8_t> staging_buffer(256); // Temporary staging buffer for writes
   // Enable/disable notifications
   if (attribute_handle == characteristic_handles_.client_configuration_handle){
-    printf("Attribute handle matches client configuration handle for %s.\nClient configuration write: handle=0x%04x, value=0x%04x\n", characteristic_values_.user_description.data(), attribute_handle, little_endian_read_16(buffer, 0));
+//    printf("Attribute handle matches client configuration handle for %s.\nClient configuration write: handle=0x%04x, value=0x%04x\n", characteristic_values_.user_description.data(), attribute_handle, little_endian_read_16(buffer, 0));
 	  characteristic_values_.client_configuration = little_endian_read_16(buffer, 0);
     return 0U;
   }
 
   // Write characteristic value
   if (attribute_handle == characteristic_handles_.value_handle) {
-    printf("Attribute handle matches value handle for %s.\nValue write: handle=0x%04x, offset=%d, buffer size=%d\n", characteristic_values_.user_description.data(), attribute_handle, offset, buffer_size);
+//    printf("Attribute handle matches value handle for %s.\nValue write: handle=0x%04x, offset=%d, buffer size=%d\n", characteristic_values_.user_description.data(), attribute_handle, offset, buffer_size);
     switch (transaction_mode) {
       case ATT_TRANSACTION_MODE_NONE:
-        printf("Transaction mode: None\n");
+//        printf("Transaction mode: None\n");
         if (offset + buffer_size != characteristic_values_.value.size()) {
           printf("Write out of bounds: offset %d + buffer size %d exceeds characteristic value size %d\n", offset, buffer_size, characteristic_values_.value.size());
           // Out of bounds write, ignore or handle error as needed
@@ -336,24 +338,24 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
             // Example: Validate that mode selection is within expected range (0-4)
             (buffer[0] > 4))
           return 0U;  // Invalid mode, but fail silently.
-        printf("Write within bounds, updating characteristic value.\n");
+//        printf("Write within bounds, updating characteristic value.\n");
         memcpy(characteristic_values_.value.data() + offset, buffer, buffer_size);
         break;
 
       case ATT_TRANSACTION_MODE_ACTIVE:
-        printf("Transaction mode: Active\n");
+//        printf("Transaction mode: Active\n");
         // Store data in staging buffer
         if (offset + buffer_size > staging_buffer.size()) {
-          printf("Staging buffer overflow: offset %d + buffer size %d exceeds staging buffer size %d\n", offset, buffer_size, staging_buffer.size());
+//          printf("Staging buffer overflow: offset %d + buffer size %d exceeds staging buffer size %d\n", offset, buffer_size, staging_buffer.size());
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_OFFSET; // Indicate error
         }
         return 0U;
 
       case ATT_TRANSACTION_MODE_VALIDATE:
-        printf("Transaction mode: Validate\n");
+//        printf("Transaction mode: Validate\n");
         if (offset + buffer_size != characteristic_values_.value.size()) {
-          printf("Validation failed: offset %d + buffer size %d does not match characteristic value size %d\n", offset, buffer_size, characteristic_values_.value.size());
+//          printf("Validation failed: offset %d + buffer size %d does not match characteristic value size %d\n", offset, buffer_size, characteristic_values_.value.size());
           // Out of bounds write, ignore or handle error as needed
           return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH; // Indicate error
         }
@@ -361,16 +363,16 @@ std::variant<std::monostate, unsigned int, uint8_t*> CustomServiceCharacteristic
         return 0U;
 
       case ATT_TRANSACTION_MODE_EXECUTE:
-        printf("Transaction mode: Execute\n");
+//        printf("Transaction mode: Execute\n");
         memcpy(characteristic_values_.value.data(), staging_buffer.data(), characteristic_values_.value.size());
         break;
 
       case ATT_TRANSACTION_MODE_CANCEL:
-        printf("Transaction mode: Cancel\n");
+//        printf("Transaction mode: Cancel\n");
         return 0U;
     
       default:
-        printf("Unknown transaction mode: %d\n", transaction_mode);
+//        printf("Unknown transaction mode: %d\n", transaction_mode);
         return 0U; // Invalid transaction mode, indicate error.
     }
     return characteristic_values_.value.data(); // Indicate success and provide pointer to new value. 

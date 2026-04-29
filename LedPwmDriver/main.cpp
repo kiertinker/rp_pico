@@ -2,6 +2,7 @@
 #include "gatt_service.h"
 #include "pwm_config_buffer_manager.h"
 
+#include "hardware/exception.h"
 #include "pico/stdio.h"
 
 #include <stdio.h>
@@ -9,9 +10,14 @@
 #include <memory>
 #include <variant>
 
+void sigbus(void){
+  printf("SIGBUS exception caught on core 0...\n");
+  while(1);
+}
 
 int main() {
   stdio_init_all();
+  exception_set_exclusive_handler(HARDFAULT_EXCEPTION,sigbus);
   sleep_ms(5000);
   for (int i = 5; i > 0; --i) {
     printf("Starting in %d seconds...\n", i);

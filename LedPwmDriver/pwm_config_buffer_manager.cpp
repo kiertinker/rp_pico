@@ -26,6 +26,7 @@ constexpr size_t PAGE_SIZE_ALLOC_CONFIG = 1024;
 constexpr uint64_t FLASH_WRITE_DELAY_US = 1000000 * 10;  // 10 seconds
 
 constexpr unsigned char* configFlashWriteAddress() {
+  printf("Calculating flash write address for PWM config data...\n");
   uint32_t flash_target_addr = ((reinterpret_cast<uint32_t>(&__flash_binary_end) + FLASH_SECTOR_SIZE - 1) & ~(FLASH_SECTOR_SIZE - 1)) - XIP_BASE;
   return reinterpret_cast<unsigned char*>(flash_target_addr);
 }
@@ -116,7 +117,7 @@ void PwmConfigData::handleAlarm() {
 }
 
 void PwmConfigData::updateFlash() {
-  printf("Updating flash with new PWM config data...\n");
+  printf("Updating flash with new PWM config data.  Flash write address: %p,  __flash_binary_end: %p.\n", configFlashWriteAddress(), __flash_binary_end);
   state_change_listener_->waitForFlashAllowed(); // Wait until we're allowed to write to flash to prevent concurrency issues with the PWM driver interrupt handler.
   flash_range_erase(reinterpret_cast<uint32_t>(configFlashWriteAddress()), FLASH_SECTOR_SIZE);
   flash_range_program(reinterpret_cast<uint32_t>(configFlashWriteAddress()), data_, PAGE_SIZE_ALLOC_CONFIG);
@@ -135,18 +136,20 @@ void PwmConfigData::operator()(CustomServiceCharacteristicIndex index, const uns
   // If last_change_time_ is non-zero, that means we have an alarm scheduled to write to flash,
   // so we can just update the config data and let the existing alarm reset itself to push the delay out further before writing to flash.
   bool set_alarm = 0 == last_change_time_;
-  printf("Received update for characteristic index %d, value size %zu.  Set alarm: %s\n", static_cast<int>(index), value_size, set_alarm ? "true" : "false");
+//  printf("Received update for characteristic index %d, value size %zu.  Set alarm: %s\n", static_cast<int>(index), value_size, set_alarm ? "true" : "false");
   switch (index) {
     case CustomServiceCharacteristicIndex::MODE_SELECTION:
-      printf("Updating mode selection with new value: %d\n", value[0]);
+//      printf("Updating mode selection with new value: %d\n", value[0]);
       // Check for immediate exit conditions
       if (value_size != 1 || value[0] > static_cast<unsigned char>(MODE_SELECTION_VALUES::MODE_PROGRAM_4)) return;  // bogus data so just bail out here.
+//      printf("Mode selection changed from %d to %d\n", static_settings_.duration, value[0]);
       if (value[0] == static_settings_.duration) return; // No change in mode, so no need to update or notify.
-      printf("Mode selection changed from %d to %d\n", static_settings_.duration, value[0]);
 
       static_settings_.duration = value[0];
-      if (state_change_listener_ == nullptr)
+      if (state_change_listener_ == nullptr) {
+//        printf("No state change listener available to notify of mode selection change.\n");
         break; // No listener to notify of state change, so break to update hash.
+      }
 
       switch (static_cast<MODE_SELECTION_VALUES>(value[0])) {
         case MODE_SELECTION_VALUES::MODE_OFF:
@@ -166,6 +169,7 @@ void PwmConfigData::operator()(CustomServiceCharacteristicIndex index, const uns
           new_state = std::monostate{};
           break;
       }
+//      printf("Notifying state change listener of mode selection change...\n");
       (*state_change_listener_)(new_state);
       break;
 
@@ -178,8 +182,10 @@ void PwmConfigData::operator()(CustomServiceCharacteristicIndex index, const uns
       std::copy(value, value + 8, &static_settings_.getBaseAddr()[1]); // +1 to skip the duration byte which is used for mode selection.
 
       if (static_settings_.duration != static_cast<unsigned char>(MODE_SELECTION_VALUES::MODE_STATIC_COLOR))
-        break; // Mode is not static color, so no need to notify of state change.
+        // Mode is not static color, so no need to notify of state change.
+        break;
       new_state.emplace<Program::ProgramEntry>(static_settings_.getBaseAddr(), 0);
+      (*state_change_listener_)(new_state);
       break;
 
     case CustomServiceCharacteristicIndex::PROGRAM_1_SETTINGS:
@@ -250,10 +256,12 @@ void PwmConfigData::initPwnConfigData(StateChangeListener* listener) {
     // This is a best effort - if it fails, we just move on.
     DisableInterruptsGuard dig;
     updateFlash();
+  } else {
+    printf("PWN config hash matches.  Config from flash is good!\n");
   }
-  return;  // TEMP return for testing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   std::variant<std::monostate, Program::ProgramEntry, Program> new_state;
 
+  printf("Initializing PWM driver with mode selection %d\n", static_cast<int>(static_settings_.duration));
   switch (static_cast<MODE_SELECTION_VALUES>(static_settings_.duration)) {
     case MODE_SELECTION_VALUES::MODE_STATIC_COLOR:
       new_state.emplace<Program::ProgramEntry>(static_settings_.getBaseAddr(), 0);
