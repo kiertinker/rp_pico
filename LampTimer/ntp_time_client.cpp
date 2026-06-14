@@ -18,6 +18,8 @@
 #include <string_view>
 #include <variant>
 
+#include "utils/scope_guard.h"
+
 constexpr std::string_view NTP_SERVER = "pool.ntp.org";
 constexpr size_t NTP_MSG_LEN = 48;
 constexpr unsigned short NTP_PORT = 123;
@@ -45,7 +47,7 @@ struct NTP_T {
   mutex mtx;
   NTP_ERR_CODE err;
 
-  NTP_T(ip_addr_t& ntp_server) : ntp_server_address(ntp_server), err(NTP_ERR_CODE::NTP_ERR_OK) {
+  NTP_T(ip_addr_t& ntp_server) : ntp_server_address(ntp_server), ntp_pcb(nullptr), err(NTP_ERR_CODE::NTP_ERR_OK) {
     ntp_pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
     if (!ntp_pcb) {
       printf("failed to create pcb\n");
@@ -53,6 +55,7 @@ struct NTP_T {
     }
     mutex_init(&mtx);
   }
+  ~NTP_T() { if (ntp_pcb != nullptr) udp_remove(ntp_pcb); }
 };
 
 // >>> DNS LOOKUP
@@ -137,7 +140,12 @@ static void ntp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
   mutex_exit(&state->mtx);
 }
 
-
+// Does the following:
+//  - Initializes the CW43 architecture.
+//  - Enables Wi-Fi station mode (for connecting to access points).
+//  - Connects to the Wi-Fi network.
+//  - Makes 3 blocking attempts to get a successful NTP response.
+//  - Disables Wi-Fi station mode and deinitializes the CW43 architecture.
 NTP_ERR_CODE getNtpTime(TimeResult &result) {
   sleep_ms(5000);
   printf("getNtpTime...\n");
@@ -145,8 +153,10 @@ NTP_ERR_CODE getNtpTime(TimeResult &result) {
     printf("getNtpTime:  cyw43 arch failed to initialize with pico error code %d\n", error_code);
     return NTP_ERR_CODE::NTP_ERR_WIFI_INIT_FAILURE;
   }
+  ScopeGuard arch_deinit_guard([]() { cyw43_arch_deinit(); });
 
   cyw43_arch_enable_sta_mode();
+  ScopeGuard disable_sta_guard([]() { cyw43_arch_disable_sta_mode(); });
 
   if (int error_code = cyw43_arch_wifi_connect_timeout_ms("JKATHOME", "06061969AD", CYW43_AUTH_WPA2_AES_PSK, 10000); error_code != 0) {
     printf("getNtpTime:  wifi connect failed with pico error code %d\n", error_code);
@@ -177,8 +187,6 @@ NTP_ERR_CODE getNtpTime(TimeResult &result) {
     }
   } while (--retries);
 
-  cyw43_arch_disable_sta_mode();
-  cyw43_arch_deinit();
   if (state.err == NTP_ERR_CODE::NTP_ERR_OK) {
     printf("got ntp response (%lld): %02d/%02d/%04d %02d:%02d:%02d\n", state.result.seconds_since_epoch, state.result.time.tm_mday, state.result.time.tm_mon + 1, state.result.time.tm_year + 1900,
         state.result.time.tm_hour, state.result.time.tm_min, state.result.time.tm_sec);

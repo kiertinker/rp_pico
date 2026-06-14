@@ -48,7 +48,10 @@ pico_enable_stdio_usb(LampTimer 1)
 target_link_libraries(LampTimer pico_stdlib)
 
 # Add the standard include files to the build
-target_include_directories(LampTimer PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(
+    LampTimer PRIVATE ${CMAKE_CURRENT_LIST_DIR}
+    $ENV{PICO_LIB_PATH}/utils/include
+)
 
 # Add any user requested libraries
 target_link_libraries(LampTimer 

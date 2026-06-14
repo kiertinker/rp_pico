@@ -171,8 +171,9 @@ bool setTime(bool init) {
 int main()
 {
   stdio_init_all();
+  
   initPins();
-  sleep_ms(5000);
+  sleep_ms(2000);
 
   // Initialization.  At startup we:
   //  - Set the current time (with respect to NTP server).
@@ -194,8 +195,8 @@ int main()
   // setting sleep timer to the next transition and going to sleep.
   int days_since_time_sync = 0;
   while (true) {
-    // Resync the clock to NTP time every 10 days.
-    if (++days_since_time_sync > 10) {
+    // Resync the clock to NTP time every 30 days.  This loop runs twice a day.
+    if (++days_since_time_sync > 60) {
       printf("main:  Resyncing time with NTP server.\n");
       if (setTime(false)) {
         days_since_time_sync = 0;
