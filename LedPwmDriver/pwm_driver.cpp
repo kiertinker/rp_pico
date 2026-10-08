@@ -79,7 +79,8 @@ struct PinMagnitude {
 
 // Sets pin magnitudes for levels set dynamically over the course of a Program entry's duration
 void setPwmLevels(const std::array<PinMagnitude, PIN_COUNT> pin_magnitudes, size_t c) {
-  for (auto i = 0; i < c; ++i) pwm_set_gpio_level(pin_magnitudes[i].pin_, pin_magnitudes[i].magnitude_ * pin_magnitudes[i].magnitude_);
+  // Square the magnitude to get a non-linear brightness curve, then divide by 8 to fit into the 13-bit PWM range (0-8191)
+  for (auto i = 0; i < c; ++i) pwm_set_gpio_level(pin_magnitudes[i].pin_, (pin_magnitudes[i].magnitude_ * pin_magnitudes[i].magnitude_) >> 3); // Square the magnitude to get a non-linear brightness curve, then divide by 8 to fit into the 13-bit PWM range (0-8191)
 }
 
 // Sets levels for all the pins in an entry (i.e. static setting or a program setting with only the program entry set).

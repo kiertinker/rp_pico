@@ -18,11 +18,6 @@ void sigbus(void){
 int main() {
   stdio_init_all();
   exception_set_exclusive_handler(HARDFAULT_EXCEPTION,sigbus);
-  sleep_ms(5000);
-  for (int i = 5; i > 0; --i) {
-    printf("Starting in %d seconds...\n", i);
-    sleep_ms(1000);
-  }
   printf("Starting main function...\n");
   
   // Example GPIO pins for two RGBW channels
